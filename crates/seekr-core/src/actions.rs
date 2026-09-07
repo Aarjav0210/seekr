@@ -1,0 +1,116 @@
+//! Primitive actions on items. These are the "tools" a higher layer (TUI, CLI, AI agent) composes.
+use crate::index::{Index, Usage};
+use crate::item::Item;
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Action {
+    /// Launch the app or open the file with its default handler.
+    Open,
+    /// Reveal in Finder.
+    Reveal,
+    /// Copy the absolute path to the clipboard.
+    CopyPath,
+    /// Open the enclosing folder in Finder.
+    OpenParent,
+    /// Quick Look preview.
+    QuickLook,
+}
+
+impl Action {
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::Open => "Open",
+            Action::Reveal => "Reveal in Finder",
+            Action::CopyPath => "Copy path",
+            Action::OpenParent => "Open enclosing folder",
+            Action::QuickLook => "Quick Look",
+        }
+    }
+
+    /// Whether performing this action counts as "using" the item for frecency.
+    pub fn counts_as_use(self) -> bool {
+        matches!(self, Action::Open | Action::Reveal | Action::OpenParent)
+    }
+}
+
+pub fn open(path: &Path) -> Result<()> {
+    run("open", &[path.as_os_str().to_string_lossy().as_ref()])
+}
+
+pub fn reveal(path: &Path) -> Result<()> {
+    run("open", &["-R", path.as_os_str().to_string_lossy().as_ref()])
+}
+
+pub fn open_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().context("no parent directory")?;
+    run("open", &[parent.as_os_str().to_string_lossy().as_ref()])
+}
+
+pub fn quick_look(path: &Path) -> Result<()> {
+    // qlmanage blocks until the preview is closed; detach it.
+    Command::new("qlmanage")
+        .arg("-p")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawning qlmanage")?;
+    Ok(())
+}
+
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("spawning pbcopy")?;
+    child
+        .stdin
+        .as_mut()
+        .context("pbcopy stdin")?
+        .write_all(text.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("pbcopy exited with {status}");
+    }
+    Ok(())
+}
+
+/// Perform `action` on `item`, recording usage in `idx` when appropriate.
+pub fn perform(action: Action, item: &Item, idx: Option<&Index>) -> Result<Option<Usage>> {
+    match action {
+        Action::Open => open(&item.path)?,
+        Action::Reveal => reveal(&item.path)?,
+        Action::CopyPath => copy_to_clipboard(&item.path.to_string_lossy())?,
+        Action::OpenParent => open_parent(&item.path)?,
+        Action::QuickLook => quick_look(&item.path)?,
+    }
+    if action.counts_as_use() {
+        if let Some(idx) = idx {
+            return Ok(Some(idx.record_use(&item.path)?));
+        }
+    }
+    Ok(None)
+}
+
+fn run(cmd: &str, args: &[&str]) -> Result<()> {
+    let out = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running {cmd}"))?;
+    if !out.status.success() {
+        bail!(
+            "{cmd} {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
