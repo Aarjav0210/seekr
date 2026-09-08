@@ -48,6 +48,27 @@ Filters combine: `cv in:Downloads ext:pdf`.
 | `^w` / `⌥⌫`| delete the last word       |
 | `^c`       | quit                       |
 
+## Ctrl+Space launcher (Hammerspoon + Terminal.app)
+
+```
+contrib/install-launcher.sh
+```
+
+Installs Hammerspoon if needed, drops `contrib/hammerspoon/seekr.lua` into
+`~/.hammerspoon`, and creates a "seekr" Terminal profile that closes its window
+when the shell exits. Ctrl+Space then pops a centered Terminal window running
+seekr; Enter or Esc makes it disappear again. Pressing the hotkey while the
+window is open just focuses it.
+
+First run only: allow Hammerspoon under System Settings › Privacy & Security ›
+Accessibility (global hotkeys), and allow it to control Terminal when macOS
+asks (Automation).
+
+The popup appears immediately but seekr itself shows up after your login shell
+has initialised (about 1.4 s on a shell with conda/nvm; seekr starts in 7 ms).
+Trimming `.zshrc`, or using a terminal with a native hotkey window (iTerm2,
+Ghostty), removes that delay.
+
 ## Keeping the index fresh
 
 Apps are rescanned live every time seekr starts. Files and folders come from

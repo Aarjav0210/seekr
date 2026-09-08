@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RESULT_LIMIT: usize = 200;
+/// Below this many columns the details pane is hidden.
+const COMPACT_WIDTH: u16 = 90;
 const SCOPE_CYCLE: [Option<Kind>; 4] = [None, Some(Kind::App), Some(Kind::Doc), Some(Kind::Folder)];
 
 struct App {
@@ -386,12 +388,17 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     draw_input(f, rows[0], app);
 
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(rows[1]);
-    draw_results(f, cols[0], app);
-    draw_preview(f, cols[1], app);
+    // Compact launcher windows: give the whole width to results.
+    if area.width < COMPACT_WIDTH {
+        draw_results(f, rows[1], app);
+    } else {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(rows[1]);
+        draw_results(f, cols[0], app);
+        draw_preview(f, cols[1], app);
+    }
     draw_status(f, rows[2], app);
 }
 
