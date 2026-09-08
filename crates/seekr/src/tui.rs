@@ -3,7 +3,11 @@ use crate::launcher;
 use crate::loader::{self, LoadOpts, Progress, Seen};
 use crate::util::{ellipsize, human_size, relative_time};
 use anyhow::{bail, Result};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -115,7 +119,11 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    // Own the mouse: otherwise the wheel scrolls the terminal's own buffer and
+    // the UI slides out of view. Wheel events move the selection instead.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = event_loop(&mut terminal, &mut app);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     if resident {
         launcher::clear_state();
@@ -139,14 +147,20 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         // Parked windows get no input; idle slowly to stay off the CPU.
         let wait = if app.hidden { 50 } else { 16 };
         if event::poll(Duration::from_millis(wait))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
                     // A key while "hidden" means the window is in fact visible.
                     if app.hidden {
                         app.wake_up();
                     }
                     app.handle_key(k.code, k.modifiers)?;
                 }
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollDown => app.move_sel(1),
+                    MouseEventKind::ScrollUp => app.move_sel(-1),
+                    _ => {}
+                },
+                _ => {}
             }
         }
         let st = app.searcher.tick(10);
@@ -454,6 +468,17 @@ fn kind_color(k: Kind) -> Color {
     }
 }
 
+/// Wordmark for the empty query, ANSI Shadow style: 40 columns, 6 rows.
+const BANNER: [&str; 6] = [
+    "███████╗███████╗███████╗██╗  ██╗██████╗ ",
+    "██╔════╝██╔════╝██╔════╝██║ ██╔╝██╔══██╗",
+    "███████╗█████╗  █████╗  █████╔╝ ██████╔╝",
+    "╚════██║██╔══╝  ██╔══╝  ██╔═██╗ ██╔══██╗",
+    "███████║███████╗███████╗██║  ██╗██║  ██║",
+    "╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝",
+];
+const BANNER_WIDTH: u16 = 40;
+
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let rows = Layout::default()
@@ -483,17 +508,19 @@ fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let q = app.searcher.query();
-    let mut title = String::from(" seekr ");
     let filters = q.describe_filters();
-    if !filters.is_empty() {
-        title = format!(" seekr · {filters} ");
-    }
+    let title = if filters.is_empty() {
+        String::from(" seekr ")
+    } else {
+        format!(" seekr · {filters} ")
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let area = inner;
     let prompt = Span::styled("❯ ", Style::default().fg(Color::Cyan).bold());
     let text = Span::raw(app.input.as_str());
     let hint = if app.input.is_empty() {
@@ -504,84 +531,53 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Span::raw("")
     };
-    f.render_widget(Paragraph::new(Line::from(vec![prompt, text, hint])), inner);
+    f.render_widget(Paragraph::new(Line::from(vec![prompt, text, hint])), area);
+    let text_end = area.x + 2 + app.input.chars().count() as u16;
     if !app.input.is_empty() {
-        let tip = "esc clear · ^w delete word";
+        let tip = "esc clear · ^w delete word ";
         let tip_w = tip.chars().count() as u16;
-        let text_end = inner.x + 2 + app.input.chars().count() as u16;
-        if inner.right() > tip_w + 3 && text_end + 3 < inner.right() - tip_w {
-            let tip_area = Rect::new(inner.right() - tip_w, inner.y, tip_w, 1);
+        if area.right() > tip_w + 3 && text_end + 3 < area.right() - tip_w {
+            let tip_area = Rect::new(area.right() - tip_w, area.y, tip_w, 1);
             f.render_widget(
                 Paragraph::new(Span::styled(tip, Style::default().fg(Color::DarkGray))),
                 tip_area,
             );
         }
     }
-    let x = inner.x + 2 + app.input.chars().count() as u16;
-    f.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), inner.y));
+    f.set_cursor_position(Position::new(text_end.min(area.right().saturating_sub(1)), area.y));
+}
+
+fn results_block(app: &App) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " {} / {} ",
+            app.searcher.matched_count(),
+            app.searcher.total_items()
+        ))
+        .border_style(Style::default().fg(Color::DarkGray))
 }
 
 fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
+    if app.input.trim().is_empty() {
+        draw_home(f, area, app);
+        return;
+    }
     if app.hits.is_empty() && !app.loading() {
         draw_empty(f, area, app);
         return;
     }
-    let width = area.width.saturating_sub(4) as usize;
-    let items: Vec<ListItem> = app
-        .hits
-        .iter()
-        .map(|h| {
-            let color = kind_color(h.item.kind);
-            let mut spans = vec![Span::styled(
-                format!("{} ", h.item.kind.glyph()),
-                Style::default().fg(color),
-            )];
-            let name_chars: Vec<char> = h.item.name.chars().collect();
-            let mut i = 0;
-            let mut idx_iter = h.indices.iter().peekable();
-            let mut buf = String::new();
-            let mut hl = false;
-            while i < name_chars.len() {
-                let is_hl = idx_iter.peek().is_some_and(|&&x| x as usize == i);
-                if is_hl {
-                    idx_iter.next();
-                }
-                if is_hl != hl && !buf.is_empty() {
-                    spans.push(styled_name(&buf, hl, color));
-                    buf.clear();
-                }
-                hl = is_hl;
-                buf.push(name_chars[i]);
-                i += 1;
-            }
-            if !buf.is_empty() {
-                spans.push(styled_name(&buf, hl, color));
-            }
-            let used: usize = name_chars.len() + 3;
-            let room = width.saturating_sub(used);
-            if room > 8 {
-                let parent = ellipsize(&h.item.parent_display(), room.saturating_sub(2));
-                spans.push(Span::styled(
-                    format!("  {parent}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+    let block = results_block(app);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_list(f, inner, app);
+}
 
-    let title = format!(
-        " {} / {} ",
-        app.searcher.matched_count(),
-        app.searcher.total_items()
-    );
+/// The result rows, with the selection highlighted, filling `area`.
+fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let width = area.width.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = app.hits.iter().map(|h| result_item(h, width)).collect();
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(40, 44, 52))
@@ -591,7 +587,119 @@ fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-/// Zero results: say so, and offer the refresh that fixes "I just downloaded it".
+fn result_item(h: &Hit, width: usize) -> ListItem<'static> {
+    let color = kind_color(h.item.kind);
+    let mut spans = vec![Span::styled(
+        format!("{} ", h.item.kind.glyph()),
+        Style::default().fg(color),
+    )];
+    let name_chars: Vec<char> = h.item.name.chars().collect();
+    let mut i = 0;
+    let mut idx_iter = h.indices.iter().peekable();
+    let mut buf = String::new();
+    let mut hl = false;
+    while i < name_chars.len() {
+        let is_hl = idx_iter.peek().is_some_and(|&&x| x as usize == i);
+        if is_hl {
+            idx_iter.next();
+        }
+        if is_hl != hl && !buf.is_empty() {
+            spans.push(styled_name(&buf, hl, color));
+            buf.clear();
+        }
+        hl = is_hl;
+        buf.push(name_chars[i]);
+        i += 1;
+    }
+    if !buf.is_empty() {
+        spans.push(styled_name(&buf, hl, color));
+    }
+    let used: usize = name_chars.len() + 3;
+    let room = width.saturating_sub(used);
+    if room > 8 {
+        let parent = ellipsize(&h.item.parent_display(), room.saturating_sub(2));
+        spans.push(Span::styled(
+            format!("  {parent}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    ListItem::new(Line::from(spans))
+}
+
+/// Empty query: the wordmark, a hint, and the most used items underneath.
+fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
+    let block = results_block(app);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    // Too small for the banner: behave like a plain result list.
+    if inner.width < BANNER_WIDTH + 2 || inner.height < 12 {
+        draw_list(f, inner, app);
+        return;
+    }
+    let x = inner.x + (inner.width - BANNER_WIDTH) / 2;
+    for (i, row) in BANNER.iter().enumerate() {
+        let line = Line::from(banner_spans(row));
+        f.render_widget(Paragraph::new(line), Rect::new(x, inner.y + 1 + i as u16, BANNER_WIDTH, 1));
+    }
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Cyan);
+    let hints = [
+        Line::from(vec![
+            Span::styled("type to find apps, documents, folders and media", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("app:", key),
+            Span::styled(" ", dim),
+            Span::styled("doc:", key),
+            Span::styled(" ", dim),
+            Span::styled("dir:", key),
+            Span::styled(" scope · ", dim),
+            Span::styled("in:", key),
+            Span::styled("Downloads · ", dim),
+            Span::styled("ext:", key),
+            Span::styled("pdf · ", dim),
+            Span::styled("⇥", key),
+            Span::styled(" cycles scope", dim),
+        ]),
+    ];
+    for (i, line) in hints.into_iter().enumerate() {
+        let w = line.width() as u16;
+        let hx = inner.x + (inner.width.saturating_sub(w)) / 2;
+        f.render_widget(Paragraph::new(line), Rect::new(hx, inner.y + 8 + i as u16, w, 1));
+    }
+    let list_y = inner.y + 11;
+    if list_y < inner.bottom() && !app.hits.is_empty() {
+        let list_area = Rect::new(inner.x, list_y, inner.width, inner.bottom() - list_y);
+        draw_list(f, list_area, app);
+    }
+}
+
+/// Blocks in the accent colour, the drop shadow dimmed.
+fn banner_spans(row: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buf = String::new();
+    let mut solid: Option<bool> = None;
+    for ch in row.chars() {
+        let is_solid = ch == '█';
+        if solid.is_some_and(|s| s != is_solid) {
+            spans.push(banner_span(&buf, solid == Some(true)));
+            buf.clear();
+        }
+        solid = Some(is_solid);
+        buf.push(ch);
+    }
+    if !buf.is_empty() {
+        spans.push(banner_span(&buf, solid == Some(true)));
+    }
+    spans
+}
+
+fn banner_span(s: &str, solid: bool) -> Span<'static> {
+    let color = if solid { Color::Cyan } else { Color::DarkGray };
+    Span::styled(s.to_string(), Style::default().fg(color))
+}
+
+/// Zero results for a real query: say so, and offer the refresh that fixes "I just downloaded it".
 fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
     let now = seekr_core::now_secs();
     let last = app
@@ -601,14 +709,10 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::Cyan);
     let mut lines = vec![Line::from("")];
-    if app.input.trim().is_empty() {
-        lines.push(Line::from(Span::styled("  nothing indexed yet", dim)));
-    } else {
-        lines.push(Line::from(vec![
-            Span::raw("  no matches for "),
-            Span::styled(app.input.clone(), Style::default().add_modifier(Modifier::BOLD)),
-        ]));
-    }
+    lines.push(Line::from(vec![
+        Span::raw("  no matches for "),
+        Span::styled(app.input.clone(), Style::default().add_modifier(Modifier::BOLD)),
+    ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::raw("  just added or downloaded it?  press "),
@@ -626,11 +730,7 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("code:", key),
         Span::raw(" for source files"),
     ]));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" 0 / {} ", app.searcher.total_items()))
-        .border_style(Style::default().fg(Color::DarkGray));
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    f.render_widget(Paragraph::new(lines).block(results_block(app)), area);
 }
 
 fn styled_name(s: &str, hl: bool, color: Color) -> Span<'static> {

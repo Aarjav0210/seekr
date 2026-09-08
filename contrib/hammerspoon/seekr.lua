@@ -1,39 +1,57 @@
 -- seekr launcher for Hammerspoon.
 --
--- Ctrl+Space shows a small, centered Terminal window running `seekr --resident`.
--- The first press creates it; seekr then stays alive, and Enter/Esc only *hide*
--- the window (seekr asks us via `hs -c "package.loaded.seekr.hide()"`), so every
--- later press just reveals it again: the UI is back in well under 100 ms and
--- typing works immediately. On reveal we send seekr SIGUSR1, which it takes
--- as "refresh the index in the background". Ctrl+C inside seekr quits for real,
--- and the window closes with it.
+-- Ctrl+Space shows a small, centered, undecorated kitty window running
+-- `seekr --resident`. The first press starts it (a few hundred milliseconds);
+-- after that seekr stays alive and Enter/Esc only *hide* the window (seekr asks
+-- us via `hs -c "package.loaded.seekr.hide()"`), so every later press just
+-- reveals it: the UI is back within a couple of frames and typing works
+-- immediately. On reveal we send seekr SIGUSR1, which it takes as "refresh the
+-- index in the background". Ctrl+C inside seekr quits it for real, and the
+-- window goes with it.
 --
--- Terminal.app specifics, all found by experiment:
---   * The "seekr" profile (contrib/terminal/make-profile.py) runs the binary in
---     place of a login shell, so ~/.zshrc is never sourced. AppleScript's
---     `do script` always goes through a shell, so the profile is opened via its
---     "Shell › New Window › seekr" menu item through the accessibility API.
---   * A single window can be hidden with AppleScript `set visible to false`;
---     setting `visible` back does nothing, but `set frontmost to true` reveals
---     it again. Both take ~40 ms. Hiding the whole app would also hide the
---     user's other Terminal windows, so we never do that.
---   * Windows cannot be moved fully off screen (macOS clamps them), and
---     minimize/unminimize animates for ~200 ms, so neither is used for parking.
+-- kitty is started as a process of its own just for seekr (config in
+-- contrib/kitty/seekr.conf), so hiding and revealing is plain app hide/unhide
+-- on that one process: instant, and it never touches other terminal windows.
+-- Terminal.app was used before; it cannot drop its title bar and hiding one of
+-- its windows needed AppleScript (see git history).
 --
 -- Install: contrib/install-launcher.sh (copies this file to ~/.hammerspoon and
 -- adds `require("seekr")` to init.lua).
 
 local M = {}
 
+local HOME = os.getenv("HOME")
+
 M.hotkey = { { "ctrl" }, "space" }
-M.profile = "seekr"               -- Terminal.app profile name
-M.command = "exec seekr"          -- fallback only: typed into a shell when the profile is missing
 M.maxSize = { w = 1100, h = 600 } -- pixels; shrinks on small screens
-
+M.config = HOME .. "/.config/seekr/kitty.conf"
 -- Written by `seekr --resident` as {"pid": N}; deleted when it exits.
-M.stateFile = os.getenv("HOME") .. "/Library/Application Support/seekr/resident.json"
+M.stateFile = HOME .. "/Library/Application Support/seekr/resident.json"
+M.debug = false -- when true, decisions and timings are appended to /tmp/seekr-hs.log
 
-M.debug = false -- when true, decisions are appended to /tmp/seekr-hs.log
+local function firstExisting(paths)
+  for _, p in ipairs(paths) do
+    if hs.fs.attributes(p) then return p end
+  end
+  return nil
+end
+
+M.terminal = firstExisting({
+  "/Applications/kitty.app/Contents/MacOS/kitty",
+  HOME .. "/Applications/kitty.app/Contents/MacOS/kitty",
+  "/opt/homebrew/bin/kitty",
+  "/usr/local/bin/kitty",
+})
+M.seekr = firstExisting({
+  HOME .. "/.cargo/bin/seekr",
+  "/opt/homebrew/bin/seekr",
+  "/usr/local/bin/seekr",
+})
+
+M._task = nil       -- hs.task of the kitty process we started
+M._launching = nil  -- hs.timer while a window is being created; guards against double launches
+M._startedAt = nil  -- when the current show began; M.lastLatency holds hotkey → window placed, in seconds
+M._prevWindow = nil -- window that had focus before seekr was shown; focus returns there on hide
 
 local function log(fmt, ...)
   if not M.debug then return end
@@ -43,44 +61,25 @@ local function log(fmt, ...)
   f:close()
 end
 
-M._windowId = nil   -- CGWindowID of the launcher window, captured when it is created
-M._launching = nil  -- hs.timer while a window is being created; guards against double launches
-M._startedAt = nil  -- when the current show began; M.lastLatency holds hotkey → window placed, in seconds
-M._prevWindow = nil -- window that had focus before seekr was shown; focus returns there on hide
-
--- The profile shows only its name in the title bar; Terminal renders that as
--- "seekr" or "Terminal — seekr". The shell fallback shows the typed command.
-local function isLauncherTitle(t)
-  t = t or ""
-  return t == "seekr" or t:match("^seekr%s") ~= nil or t:match("— seekr$") ~= nil
-    or t:find("exec seekr", 1, true) ~= nil
-end
-
--- Look a window up among Terminal's only. hs.window.get(id) walks every running
--- application's windows through the accessibility API and can take seconds when
--- some app is slow to answer; Terminal alone answers in a few milliseconds.
-local function terminalWindow(id)
-  local term = hs.application.get("Terminal")
-  if not term then return nil end
-  for _, w in ipairs(term:allWindows()) do
-    if w:id() == id then return w end
+-- The kitty process that hosts seekr, as an hs.application, or nil.
+local function app()
+  if M._task and M._task:isRunning() then
+    local a = hs.application.applicationForPID(M._task:pid())
+    if a then return a end
+  end
+  -- Hammerspoon was reloaded while seekr kept running: find the window by title.
+  for _, a in ipairs(hs.application.applicationsForBundleID("net.kovidgoyal.kitty")) do
+    for _, w in ipairs(a:allWindows()) do
+      if w:title() == "seekr" then return a end
+    end
   end
   return nil
 end
 
-local function findWindow()
-  if M._windowId then
-    local w = terminalWindow(M._windowId)
-    if w then return w end
-    M._windowId = nil
-  end
-  -- Fallback: match the title the launcher's tab ends up with.
-  local term = hs.application.get("Terminal")
-  if not term then return nil end
-  for _, w in ipairs(term:allWindows()) do
-    if isLauncherTitle(w:title()) then return w end
-  end
-  return nil
+local function windowOf(a)
+  local w = a:mainWindow()
+  if w then return w end
+  return a:allWindows()[1]
 end
 
 local function place(w)
@@ -92,36 +91,18 @@ local function place(w)
     y = s.y + math.floor(s.h * 0.16),
     w = width,
     h = height,
-  })
+  }, 0)
 end
 
 local function adopt(w)
-  M._windowId = w:id()
   local t0 = hs.timer.secondsSinceEpoch()
   place(w)
-  local t1 = hs.timer.secondsSinceEpoch()
   w:focus()
-  log("adopt: place %.0f ms, focus %.0f ms", (t1 - t0) * 1000, (hs.timer.secondsSinceEpoch() - t1) * 1000)
+  log("adopt: place+focus %.0f ms", (hs.timer.secondsSinceEpoch() - t0) * 1000)
   if M._startedAt then
     M.lastLatency = hs.timer.secondsSinceEpoch() - M._startedAt
     M._startedAt = nil
   end
-end
-
-
--- Terminal creates windows asynchronously: poll `pick` until it returns one.
-local function awaitWindow(pick)
-  local tries = 0
-  M._launching = hs.timer.doEvery(0.03, function()
-    tries = tries + 1
-    local w = pick(tries)
-    if w or tries > 100 then
-      M._launching:stop()
-      M._launching = nil
-      log("awaitWindow: %s after %d tries", w and ("adopting " .. w:id()) or "gave up", tries)
-      if w then adopt(w) end
-    end
-  end)
 end
 
 local function residentPid()
@@ -139,148 +120,76 @@ local function wakeResident()
   if pid then hs.task.new("/bin/kill", nil, { "-USR1", tostring(pid) }):start() end
 end
 
--- Bring a parked window back. Hidden windows are invisible to the accessibility
--- API (so hs.window cannot find them) but Terminal's own AppleScript window list
--- still has them: one round trip checks the remembered id, falls back to the
--- launcher title, and un-hides via `frontmost`. Returns the window id, or nil.
-local function reveal()
-  local script = string.format([[
-    tell application "Terminal"
-      if %s then
-        set frontmost of window id %d to true
-        return %d
-      end if
-      set ws to (windows whose name is "Terminal — seekr" or name is "seekr")
-      if (count of ws) > 0 then
-        set frontmost of item 1 of ws to true
-        return id of item 1 of ws
-      end if
-      return 0
-    end tell
-  ]], M._windowId and string.format("exists window id %d", M._windowId) or "false",
-     M._windowId or 0, M._windowId or 0)
-  local t0 = hs.timer.secondsSinceEpoch()
-  local ok, id, err = hs.osascript.applescript(script)
-  local t1 = hs.timer.secondsSinceEpoch()
-  log("reveal: remembered=%s ok=%s result=%s err=%s (applescript %.0f ms)", tostring(M._windowId), tostring(ok), tostring(id), ok and "" or hs.inspect(err), (t1 - t0) * 1000)
-  id = ok and tonumber(id) or 0
-  if id == 0 then return nil end
-  local term = hs.application.get("Terminal")
-  if term and term:isHidden() then term:unhide() end
-  M._windowId = id
-  local w = terminalWindow(id)
-  log("reveal: lookup %s in %.0f ms", w and "found" or "not yet", (hs.timer.secondsSinceEpoch() - t1) * 1000)
-  if w then
-    adopt(w)
-  else
-    awaitWindow(function() return terminalWindow(id) end)
+-- kitty creates its window asynchronously: poll `pick` until it returns one.
+local function awaitWindow(pick)
+  local tries = 0
+  M._launching = hs.timer.doEvery(0.03, function()
+    tries = tries + 1
+    local w = pick()
+    if w or tries > 150 then
+      M._launching:stop()
+      M._launching = nil
+      log("awaitWindow: %s after %d tries", w and "adopting" or "gave up", tries)
+      if w then adopt(w) end
+    end
+  end)
+end
+
+local function launch()
+  if not M.terminal or not M.seekr then
+    hs.alert.show("seekr: kitty or seekr not found; run contrib/install-launcher.sh")
+    return
   end
-  return id
+  M._task = hs.task.new(M.terminal, function() M._task = nil end, {
+    "--config", M.config,
+    "--title", "seekr",
+    M.seekr, "--resident",
+  })
+  M._task:start()
+  log("launch: kitty pid %s", tostring(M._task:pid()))
+  awaitWindow(function()
+    local a = app()
+    return a and windowOf(a)
+  end)
+end
+
+-- Bring the hidden window back on the current space. Returns false if there is none.
+local function reveal()
+  local a = app()
+  if not a then return false end
+  wakeResident()
+  a:unhide()
+  local w = windowOf(a)
+  if not w then return false end
+  pcall(function()
+    local here = hs.spaces.focusedSpace()
+    local there = hs.spaces.windowSpaces(w)
+    if here and there and there[1] and there[1] ~= here then
+      hs.spaces.moveWindowToSpace(w, here)
+    end
+  end)
+  adopt(w)
+  return true
 end
 
 -- Called by seekr (via the `hs` CLI) after Enter/Esc: hide the window, keep the process.
 function M.hide()
-  local w = findWindow()
-  log("hide: window=%s prev=%s", w and w:id() or "nil", M._prevWindow and M._prevWindow:title() or "nil")
-  if not w then return end
-  local term = w:application()
-  hs.osascript.applescript(string.format(
-    'tell application "Terminal" to set visible of window id %d to false', w:id()))
+  local a = app()
+  log("hide: app=%s prev=%s", a and a:pid() or "nil", M._prevWindow and M._prevWindow:title() or "nil")
+  if not a then return end
+  a:hide()
   local prev = M._prevWindow
   M._prevWindow = nil
-  if prev and prev:id() ~= w:id() and pcall(function() return prev:isVisible() end) then
-    prev:focus()
-  elseif term and #term:visibleWindows() == 0 then
-    -- Nothing to hand focus back to and no other Terminal windows: step aside entirely.
-    term:hide()
-  end
-end
-
--- Preferred path: "Shell › New Window › <profile>" is the only scriptable entry
--- point that runs a profile's own startup command (here: the seekr binary).
-local function openProfile(term)
-  local before = {}
-  for _, w in ipairs(term:allWindows()) do before[w:id()] = true end
-  if not term:selectMenuItem({ "Shell", "New Window", M.profile }) then return false end
-  awaitWindow(function(tries)
-    local t = hs.application.get("Terminal")
-    if not t then return nil end
-    local fresh
-    for _, w in ipairs(t:allWindows()) do
-      if not before[w:id()] then
-        if isLauncherTitle(w:title()) then return w end
-        fresh = fresh or w
-      end
-    end
-    -- The title can lag the window by a few frames; eventually accept any new window.
-    if tries > 15 then return fresh end
-    return nil
-  end)
-  return true
-end
-
--- Fallback: type the command into a fresh login shell. Works without the
--- profile's startup command, but pays for ~/.zshrc on every launch.
-local function openViaShell()
-  local script = string.format([[
-    tell application "Terminal"
-      if not running then launch
-      set t to do script "%s"
-      set current settings of t to settings set "%s"
-      set custom title of t to "seekr"
-      return id of front window
-    end tell
-  ]], M.command, M.profile)
-  local ok, result, err = hs.osascript.applescript(script)
-  if not ok then
-    local msg = type(err) == "table" and (err.NSLocalizedDescription or err.OSAScriptErrorMessageKey) or tostring(err)
-    hs.alert.show("seekr: " .. tostring(msg))
-    return
-  end
-  local id = tonumber(result)
-  awaitWindow(function()
-    local w = id and terminalWindow(id)
-    return w or findWindow()
-  end)
-end
-
-local function launch(attempt)
-  local term = hs.application.get("Terminal")
-  if term then
-    if openProfile(term) then return end
-    -- Menus present but no "seekr" entry: the profile is missing. Menus absent:
-    -- Terminal is still starting up, so try again shortly.
-    if term:findMenuItem({ "Shell", "New Window" }) then
-      openViaShell()
-      return
-    end
-  elseif attempt == 1 then
-    -- `launch` (unlike `activate`) starts Terminal without its startup window,
-    -- so we never leave a stray empty shell behind.
-    hs.osascript.applescript('tell application "Terminal" to launch')
-  end
-  if attempt < 60 then
-    M._launching = hs.timer.doAfter(0.05, function() launch(attempt + 1) end)
-  else
-    openViaShell()
-  end
+  if prev and pcall(function() return prev:isVisible() end) then prev:focus() end
 end
 
 function M.show()
   if M._launching then return end -- a window is already on its way
   M._startedAt = hs.timer.secondsSinceEpoch()
   local focused = hs.window.focusedWindow()
-  if focused and focused:id() ~= M._windowId then M._prevWindow = focused end
-  log("show: focusedWindow took %.0f ms", (hs.timer.secondsSinceEpoch() - M._startedAt) * 1000)
-  if hs.application.get("Terminal") then
-    -- Wake the resident first so it is redrawing while the window comes forward.
-    -- (If its window is gone, so is the process: Terminal closes one with the other.)
-    local t0 = hs.timer.secondsSinceEpoch()
-    wakeResident()
-    log("show: wake took %.0f ms", (hs.timer.secondsSinceEpoch() - t0) * 1000)
-    if reveal() then return end
-  end
-  launch(1)
+  if focused and focused:title() ~= "seekr" then M._prevWindow = focused end
+  if reveal() then return end
+  launch()
 end
 
 hs.hotkey.bind(M.hotkey[1], M.hotkey[2], M.show)
