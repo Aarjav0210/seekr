@@ -1,4 +1,5 @@
 //! Interactive fuzzy finder.
+use crate::launcher;
 use crate::loader::{self, LoadOpts, Progress, Seen};
 use crate::util::{ellipsize, human_size, relative_time};
 use anyhow::{bail, Result};
@@ -12,7 +13,7 @@ use seekr_core::actions::{self, Action};
 use seekr_core::{Config, Hit, Index, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,9 +37,23 @@ struct App {
     dirty: bool,
     quit: bool,
     last_indexed: Option<i64>,
+    /// Resident mode: Enter/Esc hide the window (via Hammerspoon) instead of quitting.
+    resident: bool,
+    /// Parked by the launcher; nothing is drawn until the next wake-up.
+    hidden: bool,
+    /// Draw one more frame after dismissing, so the window shows a clean slate when revealed.
+    final_draw: bool,
+    /// Set by SIGUSR1 when the launcher reveals the window.
+    wake: Arc<AtomicBool>,
+    /// Set by SIGTERM/SIGHUP so a resident process still restores the terminal and cleans up.
+    terminate: Arc<AtomicBool>,
+    last_refresh: Instant,
 }
 
-pub fn run(initial: String) -> Result<()> {
+/// Skip the wake-up refresh if one ran this recently.
+const REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
+
+pub fn run(initial: String, resident: bool) -> Result<()> {
     if !std::io::stdout().is_terminal() {
         bail!("seekr's interactive UI needs a terminal; try `seekr search <query>`");
     }
@@ -83,22 +98,53 @@ pub fn run(initial: String) -> Result<()> {
         dirty: true,
         quit: false,
         last_indexed,
+        resident,
+        hidden: false,
+        final_draw: false,
+        wake: Arc::new(AtomicBool::new(false)),
+        terminate: Arc::new(AtomicBool::new(false)),
+        last_refresh: Instant::now(),
     };
     app.set_input(initial);
+    if resident {
+        use signal_hook::consts::{SIGHUP, SIGTERM, SIGUSR1};
+        signal_hook::flag::register(SIGUSR1, app.wake.clone())?;
+        signal_hook::flag::register(SIGTERM, app.terminate.clone())?;
+        signal_hook::flag::register(SIGHUP, app.terminate.clone())?;
+        launcher::write_state();
+    }
 
     let mut terminal = ratatui::init();
     let res = event_loop(&mut terminal, &mut app);
     ratatui::restore();
+    if resident {
+        launcher::clear_state();
+    }
     res
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     let mut was_running = false;
     while !app.quit {
-        terminal.draw(|f| draw(f, app))?;
-        if event::poll(Duration::from_millis(16))? {
+        if app.terminate.load(Ordering::Acquire) {
+            break;
+        }
+        if app.wake.swap(false, Ordering::AcqRel) {
+            app.wake_up();
+        }
+        if !app.hidden || app.final_draw {
+            terminal.draw(|f| draw(f, app))?;
+            app.final_draw = false;
+        }
+        // Parked windows get no input; idle slowly to stay off the CPU.
+        let wait = if app.hidden { 50 } else { 16 };
+        if event::poll(Duration::from_millis(wait))? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
+                    // A key while "hidden" means the window is in fact visible.
+                    if app.hidden {
+                        app.wake_up();
+                    }
                     app.handle_key(k.code, k.modifiers)?;
                 }
             }
@@ -202,6 +248,34 @@ impl App {
         self.status = Some((msg.into(), Instant::now()));
     }
 
+    /// Done with this interaction: quit, or in resident mode reset and hide.
+    fn dismiss(&mut self) {
+        if !self.resident {
+            self.quit = true;
+            return;
+        }
+        self.set_input(String::new());
+        self.status = None;
+        self.hidden = true;
+        self.final_draw = true;
+        if !launcher::hide_window() {
+            // No Hammerspoon to park us: behave like a normal one-shot run.
+            self.quit = true;
+        }
+    }
+
+    /// The launcher revealed the window: draw again and pick up new files in the background.
+    fn wake_up(&mut self) {
+        self.hidden = false;
+        self.dirty = true;
+        if self.cfg.refresh_on_launch
+            && !self.refreshing()
+            && self.last_refresh.elapsed() > REFRESH_COOLDOWN
+        {
+            self.refresh_index(false);
+        }
+    }
+
     fn selected_hit(&self) -> Option<&Hit> {
         self.hits.get(self.selected)
     }
@@ -232,7 +306,7 @@ impl App {
             }
         }
         if quit_after {
-            self.quit = true;
+            self.dismiss();
         } else {
             self.flash(format!("{} ✓", action.label()));
         }
@@ -279,12 +353,15 @@ impl App {
         self.set_input(new);
     }
 
-    /// User-prompted refresh (Ctrl-x): re-walk everything currently loaded.
-    fn refresh_index(&mut self) {
+    /// Re-walk everything currently loaded (Ctrl-x, or silently on wake-up).
+    fn refresh_index(&mut self, announce: bool) {
         if self.refreshing() {
-            self.flash("a refresh is already running");
+            if announce {
+                self.flash("a refresh is already running");
+            }
             return;
         }
+        self.last_refresh = Instant::now();
         let p = loader::spawn(
             self.cfg.clone(),
             self.searcher.injector(),
@@ -299,7 +376,9 @@ impl App {
             },
         );
         self.loaders.push(p);
-        self.flash("refreshing index…");
+        if announce {
+            self.flash("refreshing index…");
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Result<()> {
@@ -309,7 +388,7 @@ impl App {
             // Spotlight convention: esc clears the query first, a second esc dismisses.
             (KeyCode::Esc, _) => {
                 if self.input.is_empty() {
-                    self.quit = true;
+                    self.dismiss();
                 } else {
                     self.clear_input();
                     self.flash("cleared · esc again to quit");
@@ -322,7 +401,7 @@ impl App {
             (KeyCode::Char('e'), true) => self.act(Action::OpenParent, true)?,
             (KeyCode::Char('y'), true) => self.act(Action::CopyPath, false)?,
             (KeyCode::Char('v'), true) => self.act(Action::QuickLook, false)?,
-            (KeyCode::Char('x'), true) => self.refresh_index(),
+            (KeyCode::Char('x'), true) => self.refresh_index(true),
             (KeyCode::Tab, _) => self.cycle_scope(),
             (KeyCode::Down, _) | (KeyCode::Char('n'), true) | (KeyCode::Char('j'), true) => {
                 self.move_sel(1)
@@ -630,7 +709,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
         ]));
         lines.push(Line::from(vec![
             Span::styled("esc ", Style::default().fg(Color::Cyan)),
-            Span::raw("clear, then quit  "),
+            Span::raw(if app.resident { "clear, then hide  " } else { "clear, then quit  " }),
             Span::styled("^u ", Style::default().fg(Color::Cyan)),
             Span::raw("clear  "),
             Span::styled("^w ⌥⌫ ", Style::default().fg(Color::Cyan)),
@@ -680,8 +759,9 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     } else {
         spans.push(Span::styled(" ready ", Style::default().fg(Color::Green)));
     }
+    let esc = if app.resident { "esc clear/hide · ^c quit" } else { "esc clear/quit" };
     spans.push(Span::styled(
-        "  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ scope · ^x refresh · esc clear/quit",
+        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ scope · ^x refresh · {esc}"),
         Style::default().fg(Color::DarkGray),
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);

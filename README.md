@@ -17,15 +17,23 @@ contrib/install-launcher.sh            # optional: Ctrl+Space popup
 ```
 
 The launcher script installs Hammerspoon, drops `contrib/hammerspoon/seekr.lua`
-into `~/.hammerspoon`, and creates a "seekr" Terminal profile whose window
-closes when seekr exits. Ctrl+Space then pops a centered terminal running
-seekr; Enter or Esc dismisses it. macOS will ask once to allow Hammerspoon
-under Accessibility (global hotkeys) and Automation (controlling Terminal).
+into `~/.hammerspoon`, and creates a "seekr" Terminal profile that runs
+`seekr --resident` directly in place of a login shell. The first Ctrl+Space
+creates the window (a few hundred milliseconds: no shell, so `~/.zshrc` is
+never sourced). After that seekr stays alive: Enter and Esc hide the window
+instead of quitting, and the next Ctrl+Space reveals it again in under 100 ms,
+ready to type, while the index refreshes in the background. Ctrl+C
+inside seekr quits it for real. The resident process holds the index in memory
+(tens of MB) and idles otherwise. The profile stores the binary's absolute path,
+so re-run the script if seekr moves. macOS will ask once to allow Hammerspoon
+under Accessibility (global hotkeys, opening the Terminal profile) and
+Automation (controlling Terminal).
 
 ## Use
 
 ```sh
 seekr                              # interactive finder
+seekr --resident                   # finder that hides instead of quitting (launcher)
 seekr app: whatsapp                # finder, pre-filled
 seekr search doc: offer letter     # one-shot, prints a table
 seekr search --json -n 5 cv        # JSON for scripts and agents
@@ -57,22 +65,23 @@ you actually launch.
 
 | Key          | Action                                        |
 |--------------|-----------------------------------------------|
-| `⏎`          | open, then quit                               |
+| `⏎`          | open, then quit (launcher: hide)              |
 | `^r`         | reveal in Finder                              |
 | `^e`         | open enclosing folder                         |
 | `^y`         | copy path                                     |
 | `^v`         | Quick Look                                    |
 | `⇥`          | cycle scope: none → app → doc → dir           |
 | `^x`         | refresh the index                             |
-| `esc`        | clear the query; on an empty query, quit      |
+| `esc`        | clear the query; on an empty query, quit (launcher: hide) |
 | `^u` / `^w`  | clear the query / delete the last word        |
-| `^c`         | quit                                          |
+| `^c`         | quit, also in the launcher                    |
 
 ## Freshness
 
 Apps are rescanned live on every start. Files come from the index, which is
-refreshed in the background on every launch (about 1.5 s for 150k items) and
-on demand with `^x`, `seekr refresh`, or `seekr search --fresh`. A refresh
+refreshed in the background on every launch and every time the launcher reveals
+a resident seekr (about 1.5 s for 150k items), and on demand with `^x`,
+`seekr refresh`, or `seekr search --fresh`. A refresh
 diffs the walk against the cache and writes only the delta, then reports it:
 `refreshed in 1.6s · +1 added · −0 removed · 0 updated`. New files stream into
 an open finder as they are found; deleted ones leave the index immediately but
@@ -93,7 +102,7 @@ seekr is logged, so things you use often float up. Python virtualenvs,
 crates/seekr-core   library, no UI: items, query parser, providers (apps, files),
                     SQLite index + usage log, nucleo matcher + re-ranking,
                     actions (open/reveal/copy/quick-look), doctor
-crates/seekr        binary: clap CLI + ratatui TUI
+crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)
 contrib/            Ctrl+Space launcher (Hammerspoon config, Terminal profile)
 ```
 

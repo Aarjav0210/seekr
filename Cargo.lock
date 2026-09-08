@@ -1521,6 +1521,7 @@ dependencies = [
  "ratatui",
  "seekr-core",
  "serde_json",
+ "signal-hook",
 ]
 
 [[package]]

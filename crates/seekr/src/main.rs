@@ -1,4 +1,5 @@
 mod cli;
+mod launcher;
 mod loader;
 mod tui;
 mod util;
@@ -14,6 +15,11 @@ struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
 
+    /// Stay alive after Enter/Esc: hide the launcher window instead of quitting, so the
+    /// next Ctrl+Space shows the UI instantly. Used by contrib/ (Hammerspoon + Terminal).
+    #[arg(long)]
+    resident: bool,
+
     /// Initial query for the interactive UI (e.g. `seekr app: whatsapp`).
     #[arg(trailing_var_arg = true)]
     query: Vec<String>,
@@ -23,6 +29,9 @@ struct Cli {
 enum Cmd {
     /// Interactive fuzzy finder (default when no subcommand is given).
     Tui {
+        /// See `seekr --help`.
+        #[arg(long)]
+        resident: bool,
         #[arg(trailing_var_arg = true)]
         query: Vec<String>,
     },
@@ -76,8 +85,8 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        None => tui::run(cli.query.join(" ")),
-        Some(Cmd::Tui { query }) => tui::run(query.join(" ")),
+        None => tui::run(cli.query.join(" "), cli.resident),
+        Some(Cmd::Tui { resident, query }) => tui::run(query.join(" "), resident),
         Some(Cmd::Search {
             query,
             limit,
