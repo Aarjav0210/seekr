@@ -16,18 +16,18 @@ cargo install --path crates/seekr      # binary → ~/.cargo/bin/seekr
 contrib/install-launcher.sh            # optional: Ctrl+Space popup
 ```
 
-The launcher script installs Hammerspoon, drops `contrib/hammerspoon/seekr.lua`
-into `~/.hammerspoon`, and creates a "seekr" Terminal profile that runs
-`seekr --resident` directly in place of a login shell. The first Ctrl+Space
-creates the window (a few hundred milliseconds: no shell, so `~/.zshrc` is
-never sourced). After that seekr stays alive: Enter and Esc hide the window
-instead of quitting, and the next Ctrl+Space reveals it again in under 100 ms,
-ready to type, while the index refreshes in the background. Ctrl+C
-inside seekr quits it for real. The resident process holds the index in memory
-(tens of MB) and idles otherwise. The profile stores the binary's absolute path,
-so re-run the script if seekr moves. macOS will ask once to allow Hammerspoon
-under Accessibility (global hotkeys, opening the Terminal profile) and
-Automation (controlling Terminal).
+The launcher script installs kitty and Hammerspoon, drops
+`contrib/hammerspoon/seekr.lua` into `~/.hammerspoon` and
+`contrib/kitty/seekr.conf` into `~/.config/seekr/kitty.conf`. Ctrl+Space opens
+an undecorated kitty window (no title bar) running `seekr --resident` directly,
+with no login shell in between, so `~/.zshrc` is never sourced. The first press
+creates the window in a few hundred milliseconds. After that seekr stays alive:
+Enter and Esc hide the window instead of quitting, and the next Ctrl+Space
+reveals it again within a couple of frames, ready to type, while the index
+refreshes in the background. Ctrl+C inside seekr quits it for real. The
+resident process holds the index in memory (tens of MB) and idles otherwise.
+macOS will ask once to allow Hammerspoon under Accessibility (global hotkeys,
+window placement).
 
 ## Use
 
@@ -103,7 +103,7 @@ crates/seekr-core   library, no UI: items, query parser, providers (apps, files)
                     SQLite index + usage log, nucleo matcher + re-ranking,
                     actions (open/reveal/copy/quick-look), doctor
 crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)
-contrib/            Ctrl+Space launcher (Hammerspoon config, Terminal profile)
+contrib/            Ctrl+Space launcher (Hammerspoon config, kitty config)
 ```
 
 Index: `~/Library/Application Support/seekr/index.db`.
