@@ -29,7 +29,8 @@ The launcher script installs kitty and Hammerspoon, drops
 `contrib/hammerspoon/seekr.lua` into `~/.hammerspoon` and
 `contrib/kitty/seekr.conf` into `~/.config/seekr/kitty.conf`. Ctrl+Space opens
 an undecorated kitty window (no title bar) running `seekr --resident` directly,
-with no login shell in between, so `~/.zshrc` is never sourced. The first press
+with no login shell in between, so `~/.zshrc` is never sourced. That kitty is
+kept out of Cmd+Tab and the Dock; Ctrl+Space is the only way to it. The first press
 creates the window in a few hundred milliseconds. After that seekr stays alive:
 Enter and Esc hide the window instead of quitting, and the next Ctrl+Space
 reveals it again within a couple of frames, ready to type, while the index
