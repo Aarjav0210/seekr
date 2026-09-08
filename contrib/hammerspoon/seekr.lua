@@ -9,6 +9,10 @@
 -- index in the background". Ctrl+C inside seekr quits it for real, and the
 -- window goes with it.
 --
+-- Ctrl+Space while seekr has focus hides it again, whatever the query says.
+-- seekr is told with SIGUSR2 so it keeps the text and shows it selected on the
+-- next reveal: typing replaces it, an arrow key keeps it.
+--
 -- kitty is started as a process of its own just for seekr (config in
 -- contrib/kitty/seekr.conf), so hiding and revealing is plain app hide/unhide
 -- on that one process: instant, and it never touches other terminal windows.
@@ -25,7 +29,9 @@ local HOME = os.getenv("HOME")
 M.hotkey = { { "ctrl" }, "space" }
 M.maxSize = { w = 1100, h = 600 } -- pixels; shrinks on small screens
 M.config = HOME .. "/.config/seekr/kitty.conf"
--- Written by `seekr --resident` as {"pid": N}; deleted when it exits.
+-- Written by `seekr --resident` as {"pid": N, "park": "USR2"}; deleted when it
+-- exits. "park" names the signal that tells seekr "the launcher hid you"; older
+-- binaries omit it and are simply hidden without being told.
 M.stateFile = HOME .. "/Library/Application Support/seekr/resident.json"
 M.debug = false -- when true, decisions and timings are appended to /tmp/seekr-hs.log
 
@@ -105,19 +111,32 @@ local function adopt(w)
   end
 end
 
-local function residentPid()
+-- The resident seekr's pid and the name of its "parked" signal (nil for old binaries).
+local function residentState()
   local f = io.open(M.stateFile)
-  if not f then return nil end
+  if not f then return nil, nil end
   local s = f:read("*a") or ""
   f:close()
-  return tonumber(s:match('"pid"%s*:%s*(%d+)'))
+  return tonumber(s:match('"pid"%s*:%s*(%d+)')), s:match('"park"%s*:%s*"(%w+)"')
 end
 
--- Tell the resident seekr to wake up (refresh in the background). Fire-and-forget
--- without a shell: hs.execute would cost tens of milliseconds on the hot path.
+-- Fire-and-forget signal to the resident seekr, without a shell: hs.execute
+-- would cost tens of milliseconds on the hot path.
+local function signalResident(pid, sig)
+  hs.task.new("/bin/kill", nil, { "-" .. sig, tostring(pid) }):start()
+end
+
+-- Tell the resident seekr to wake up (refresh in the background).
 local function wakeResident()
-  local pid = residentPid()
-  if pid then hs.task.new("/bin/kill", nil, { "-USR1", tostring(pid) }):start() end
+  local pid = residentState()
+  if pid then signalResident(pid, "USR1") end
+end
+
+-- Tell the resident seekr the launcher just hid it, so it stops drawing and
+-- keeps the query for the next reveal.
+local function parkResident()
+  local pid, park = residentState()
+  if pid and park then signalResident(pid, park) end
 end
 
 -- kitty creates its window asynchronously: poll `pick` until it returns one.
@@ -183,11 +202,18 @@ function M.hide()
   if prev and pcall(function() return prev:isVisible() end) then prev:focus() end
 end
 
+-- Ctrl+Space: reveal seekr, or hide it again when it already has focus.
 function M.show()
   if M._launching then return end -- a window is already on its way
-  M._startedAt = hs.timer.secondsSinceEpoch()
   local focused = hs.window.focusedWindow()
-  if focused and focused:title() ~= "seekr" then M._prevWindow = focused end
+  if focused and focused:title() == "seekr" then
+    log("show: seekr focused, hiding")
+    M.hide()
+    parkResident()
+    return
+  end
+  M._startedAt = hs.timer.secondsSinceEpoch()
+  if focused then M._prevWindow = focused end
   if reveal() then return end
   launch()
 end

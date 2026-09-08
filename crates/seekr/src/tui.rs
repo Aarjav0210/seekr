@@ -47,8 +47,13 @@ struct App {
     hidden: bool,
     /// Draw one more frame after dismissing, so the window shows a clean slate when revealed.
     final_draw: bool,
+    /// The whole query is selected (after a Ctrl+Space hide with text): the next
+    /// character replaces it, any other key keeps it.
+    input_selected: bool,
     /// Set by SIGUSR1 when the launcher reveals the window.
     wake: Arc<AtomicBool>,
+    /// Set by SIGUSR2 when the launcher hid the window itself (Ctrl+Space toggle).
+    park: Arc<AtomicBool>,
     /// Set by SIGTERM/SIGHUP so a resident process still restores the terminal and cleans up.
     terminate: Arc<AtomicBool>,
     last_refresh: Instant,
@@ -105,14 +110,17 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         resident,
         hidden: false,
         final_draw: false,
+        input_selected: false,
         wake: Arc::new(AtomicBool::new(false)),
+        park: Arc::new(AtomicBool::new(false)),
         terminate: Arc::new(AtomicBool::new(false)),
         last_refresh: Instant::now(),
     };
     app.set_input(initial);
     if resident {
-        use signal_hook::consts::{SIGHUP, SIGTERM, SIGUSR1};
+        use signal_hook::consts::{SIGHUP, SIGTERM, SIGUSR1, SIGUSR2};
         signal_hook::flag::register(SIGUSR1, app.wake.clone())?;
+        signal_hook::flag::register(SIGUSR2, app.park.clone())?;
         signal_hook::flag::register(SIGTERM, app.terminate.clone())?;
         signal_hook::flag::register(SIGHUP, app.terminate.clone())?;
         launcher::write_state();
@@ -136,6 +144,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     while !app.quit {
         if app.terminate.load(Ordering::Acquire) {
             break;
+        }
+        if app.park.swap(false, Ordering::AcqRel) {
+            app.parked();
         }
         if app.wake.swap(false, Ordering::AcqRel) {
             app.wake_up();
@@ -219,6 +230,7 @@ impl App {
 
     fn set_input(&mut self, s: String) {
         self.input = s;
+        self.input_selected = false;
         let q = Query::parse(&self.input);
         if let Some(k) = q.scope {
             self.ensure_kind_loaded(k);
@@ -276,6 +288,19 @@ impl App {
             // No Hammerspoon to park us: behave like a normal one-shot run.
             self.quit = true;
         }
+    }
+
+    /// The launcher hid the window without asking (Ctrl+Space while we had focus):
+    /// stop drawing, keep the query, and select it so the next reveal can either
+    /// type over it or carry on with it.
+    fn parked(&mut self) {
+        if !self.resident {
+            return;
+        }
+        self.hidden = true;
+        self.final_draw = true;
+        self.status = None;
+        self.input_selected = !self.input.is_empty();
     }
 
     /// The launcher revealed the window: draw again and pick up new files in the background.
@@ -397,6 +422,22 @@ impl App {
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
+        // Selected query (kept from a Ctrl+Space hide): a character or backspace
+        // replaces it, like a selected text field; any other key deselects and
+        // acts as usual, so arrows, Enter, Tab and ^-chords keep the text.
+        if std::mem::take(&mut self.input_selected) {
+            match (code, ctrl) {
+                (KeyCode::Char(ch), false) => {
+                    self.set_input(ch.to_string());
+                    return Ok(());
+                }
+                (KeyCode::Backspace, _) if !mods.contains(KeyModifiers::ALT) => {
+                    self.clear_input();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match (code, ctrl) {
             (KeyCode::Char('c'), true) | (KeyCode::Char('g'), true) => self.quit = true,
             // Spotlight convention: esc clears the query first, a second esc dismisses.
@@ -522,7 +563,14 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(block, area);
     let area = inner;
     let prompt = Span::styled("❯ ", Style::default().fg(Color::Cyan).bold());
-    let text = Span::raw(app.input.as_str());
+    let text = if app.input_selected {
+        Span::styled(
+            app.input.as_str(),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        )
+    } else {
+        Span::raw(app.input.as_str())
+    };
     let hint = if app.input.is_empty() {
         Span::styled(
             "type to search · app: doc: dir: in: ext: · ⇥ cycles scope",
@@ -534,7 +582,11 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(vec![prompt, text, hint])), area);
     let text_end = area.x + 2 + app.input.chars().count() as u16;
     if !app.input.is_empty() {
-        let tip = "esc clear · ^w delete word ";
+        let tip = if app.input_selected {
+            "type to replace · → keeps · esc clear "
+        } else {
+            "esc clear · ^w delete word "
+        };
         let tip_w = tip.chars().count() as u16;
         if area.right() > tip_w + 3 && text_end + 3 < area.right() - tip_w {
             let tip_area = Rect::new(area.right() - tip_w, area.y, tip_w, 1);

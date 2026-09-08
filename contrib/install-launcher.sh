@@ -46,6 +46,9 @@ sys.exit(0 if "seekr" in str(p.get("CommandString", "")) else 1)' \
     && osascript -e 'tell application "Terminal" to delete settings set "seekr"' >/dev/null 2>&1 \
     && echo "removed the old Terminal profile 'seekr'" || true
 fi
+# End a resident seekr from a previous install too, so the next Ctrl+Space
+# starts the freshly installed binary (its kitty window closes with it).
+pkill -TERM -f -- 'seekr --resident' 2>/dev/null || true
 rm -f "$HOME/Library/Application Support/seekr/resident.json"
 
 # (Re)start Hammerspoon so it picks up the config. The `hs` CLI is avoided on
@@ -62,7 +65,7 @@ osascript -e 'tell application "Hammerspoon" to execute lua code "hs.accessibili
 cat <<MSG
 
 seekr launcher installed.
-  hotkey:    ctrl+space
+  hotkey:    ctrl+space (again while seekr is in front: hide, query kept)
   config:    ~/.hammerspoon/seekr.lua, ~/.config/seekr/kitty.conf
   runs:      $SEEKR_BIN --resident (inside kitty)
 

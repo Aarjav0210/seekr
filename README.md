@@ -24,7 +24,10 @@ with no login shell in between, so `~/.zshrc` is never sourced. The first press
 creates the window in a few hundred milliseconds. After that seekr stays alive:
 Enter and Esc hide the window instead of quitting, and the next Ctrl+Space
 reveals it again within a couple of frames, ready to type, while the index
-refreshes in the background. Ctrl+C inside seekr quits it for real. The
+refreshes in the background. Ctrl+Space while seekr is in front hides it again,
+whatever the query says; the query is kept and comes back selected, so typing
+replaces it and an arrow key (or Enter, Tab, any `^` chord) keeps it. Ctrl+C
+inside seekr quits it for real. The
 resident process holds the index in memory (tens of MB) and idles otherwise.
 macOS will ask once to allow Hammerspoon under Accessibility (global hotkeys,
 window placement).
@@ -75,6 +78,7 @@ you actually launch.
 | `esc`        | clear the query; on an empty query, quit (launcher: hide) |
 | `^u` / `^w`  | clear the query / delete the last word        |
 | `^c`         | quit, also in the launcher                    |
+| `⌃space`     | launcher only: hide, keeping the query selected for next time |
 
 ## Freshness
 

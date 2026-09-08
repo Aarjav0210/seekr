@@ -5,19 +5,26 @@
 //! typing works immediately. Hiding is Hammerspoon's job (it owns window
 //! placement and restores focus to the previous app); seekr just asks for it.
 //! Hammerspoon in turn sends SIGUSR1 when it reveals the window, which seekr
-//! treats as "wake up and refresh in the background".
+//! treats as "wake up and refresh in the background", and SIGUSR2 when the
+//! hotkey hid the window behind seekr's back (Ctrl+Space while seekr had focus),
+//! so seekr can stop drawing and keep the query for the next reveal.
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use seekr_core::Config;
 
-/// Where the resident process advertises itself: `{"pid": N}`.
+/// Where the resident process advertises itself: `{"pid": N, "park": "USR2"}`.
+/// `park` names the signal the launcher may send after hiding the window; a
+/// launcher script that predates it just reads `pid`.
 pub fn state_path() -> PathBuf {
     Config::data_dir().join("resident.json")
 }
 
 pub fn write_state() {
-    let _ = std::fs::write(state_path(), format!("{{\"pid\": {}}}\n", std::process::id()));
+    let _ = std::fs::write(
+        state_path(),
+        format!("{{\"pid\": {}, \"park\": \"USR2\"}}\n", std::process::id()),
+    );
 }
 
 pub fn clear_state() {
