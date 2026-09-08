@@ -86,7 +86,7 @@ impl Searcher {
         self.nucleo.pattern.reparse(
             0,
             &col0,
-            CaseMatching::Smart,
+            CaseMatching::Ignore,
             Normalization::Smart,
             append,
         );
@@ -262,5 +262,51 @@ pub fn kinds_for_query(q: &Query, lazy: &[Kind]) -> Vec<Kind> {
             .copied()
             .filter(|k| !lazy.contains(k))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn searcher_with(names: &[&str]) -> Searcher {
+        let mut s = Searcher::new(HashMap::new(), Vec::new());
+        for n in names {
+            s.push(Item::new(Kind::App, *n, format!("/Applications/{n}.app")));
+        }
+        s
+    }
+
+    fn settle(s: &mut Searcher) {
+        for _ in 0..200 {
+            if !s.tick(10).running {
+                return;
+            }
+        }
+        panic!("matcher did not settle");
+    }
+
+    fn names(s: &mut Searcher, raw: &str) -> Vec<String> {
+        s.set_query(Query::parse(raw));
+        settle(s);
+        s.results(10).into_iter().map(|h| h.item.name).collect()
+    }
+
+    #[test]
+    fn uppercase_query_matches_mixed_case_name() {
+        let mut s = searcher_with(&["Arc", "Safari"]);
+        assert_eq!(names(&mut s, "ARC"), vec!["Arc"]);
+        assert_eq!(names(&mut s, "arc"), vec!["Arc"]);
+        assert_eq!(names(&mut s, "aRc"), vec!["Arc"]);
+    }
+
+    #[test]
+    fn uppercase_query_still_matches_when_typed_incrementally() {
+        let mut s = searcher_with(&["Arc", "Safari"]);
+        // Each keystroke appends to the previous pattern; every step must keep "Arc".
+        for q in ["A", "AR", "ARC"] {
+            assert!(names(&mut s, q).contains(&"Arc".to_string()), "query {q:?} lost Arc");
+        }
+        assert_eq!(names(&mut s, "ARC"), vec!["Arc"]);
     }
 }
