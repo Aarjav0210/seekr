@@ -1,0 +1,151 @@
+//! Streams items into a live matcher from a background thread:
+//! live app scan → cached index rows → (optionally) an incremental refresh walk
+//! whose newly discovered items are streamed in as they are found.
+use anyhow::Result;
+use seekr_core::indexer::{self, RefreshReport};
+use seekr_core::providers::apps;
+use seekr_core::{Config, Index, Injector, Item, Kind, Searcher};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+pub struct Progress {
+    /// Items this loader has pushed into the matcher.
+    pub loaded: AtomicUsize,
+    /// New (previously unindexed) items found by the refresh walk so far.
+    pub added: AtomicUsize,
+    pub refreshing: AtomicBool,
+    pub done: AtomicBool,
+    announced: AtomicBool,
+    report: Mutex<Option<RefreshReport>>,
+    error: Mutex<Option<String>>,
+}
+
+impl Progress {
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    pub fn is_refreshing(&self) -> bool {
+        self.refreshing.load(Ordering::Acquire)
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|e| e.clone())
+    }
+
+    /// The refresh report, returned exactly once after completion (for a one-time UI notice).
+    pub fn take_report_once(&self) -> Option<RefreshReport> {
+        if self.is_done() && !self.announced.swap(true, Ordering::AcqRel) {
+            return self.report.lock().ok().and_then(|r| r.clone());
+        }
+        None
+    }
+}
+
+pub type Seen = Arc<Mutex<HashSet<PathBuf>>>;
+
+pub struct LoadOpts {
+    pub kinds: Vec<Kind>,
+    /// After loading cached items, re-walk the roots and stream anything new.
+    pub refresh: bool,
+}
+
+pub fn spawn(cfg: Config, inj: Injector<Item>, seen: Seen, opts: LoadOpts) -> Arc<Progress> {
+    let progress = Arc::new(Progress::default());
+    let p = progress.clone();
+    std::thread::Builder::new()
+        .name("seekr-loader".into())
+        .spawn(move || {
+            if let Err(e) = load(&cfg, &inj, &seen, &opts, &p) {
+                *p.error.lock().unwrap() = Some(e.to_string());
+            }
+            p.refreshing.store(false, Ordering::Release);
+            p.done.store(true, Ordering::Release);
+        })
+        .expect("spawn loader thread");
+    progress
+}
+
+fn load(
+    cfg: &Config,
+    inj: &Injector<Item>,
+    seen: &Seen,
+    opts: &LoadOpts,
+    p: &Progress,
+) -> Result<()> {
+    let mut idx = Index::open_default()?;
+    let push = |item: Item| {
+        let fresh = seen.lock().unwrap().insert(item.path.clone());
+        if fresh {
+            Searcher::inject(inj, item);
+            p.loaded.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+
+    let apps = apps::scan_app_dirs(cfg);
+    if opts.kinds.contains(&Kind::App) {
+        for a in &apps {
+            push(a.clone());
+        }
+    }
+    for it in idx.load_items(Some(&opts.kinds))? {
+        push(it);
+    }
+
+    if opts.refresh {
+        p.refreshing.store(true, Ordering::Release);
+        let kinds = &opts.kinds;
+        let report = indexer::refresh(cfg, &mut idx, &apps, |it| {
+            p.added.fetch_add(1, Ordering::Relaxed);
+            if kinds.contains(&it.kind) {
+                push(it.clone());
+            }
+        })?;
+        *p.report.lock().unwrap() = Some(report);
+        p.refreshing.store(false, Ordering::Release);
+    }
+    Ok(())
+}
+
+/// Synchronous variant for one-shot CLI use. Builds the index if it is empty,
+/// refreshes it first if `fresh`, then loads everything of `kinds` into `searcher`.
+pub fn load_blocking(
+    cfg: &Config,
+    searcher: &Searcher,
+    kinds: &[Kind],
+    fresh: bool,
+) -> Result<Option<RefreshReport>> {
+    let mut idx = Index::open_default()?;
+    let mut report = None;
+    let apps = apps::scan_app_dirs(cfg);
+    if idx.count()? == 0 {
+        eprintln!("seekr: index is empty, building it first (this happens once)…");
+        let r = indexer::reindex(cfg, &mut idx, false, |_| {})?;
+        eprintln!(
+            "seekr: indexed {} apps, {} files, {} folders in {:.1}s",
+            r.apps,
+            r.files,
+            r.folders,
+            r.elapsed_ms as f64 / 1000.0
+        );
+    } else if fresh {
+        report = Some(indexer::refresh(cfg, &mut idx, &apps, |_| {})?);
+    }
+    let mut seen = HashSet::new();
+    if kinds.contains(&Kind::App) {
+        for a in apps {
+            if seen.insert(a.path.clone()) {
+                searcher.push(a);
+            }
+        }
+    }
+    for it in idx.load_items(Some(kinds))? {
+        if seen.insert(it.path.clone()) {
+            searcher.push(it);
+        }
+    }
+    Ok(report)
+}

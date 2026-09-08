@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/seekr-core", "crates/seekr"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
