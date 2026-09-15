@@ -1,7 +1,8 @@
 #!/bin/sh
-# Set up the Ctrl+Space launcher: kitty (undecorated window) + Hammerspoon config.
-# kitty runs `seekr --resident` directly (no login shell, so no ~/.zshrc delay);
-# seekr then stays alive between uses and the hotkey only reveals its window.
+# Set up the Ctrl+Space launcher: kitty (a panel window, so it is on every
+# desktop) + Hammerspoon config. kitty runs `seekr --resident` directly (no login
+# shell, so no ~/.zshrc delay); seekr then stays alive between uses and the
+# hotkey only reveals its window.
 # Safe to re-run. Requires Homebrew for the kitty/Hammerspoon install steps.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -18,6 +19,15 @@ fi
 if [ ! -d /Applications/kitty.app ] && [ ! -d "$HOME/Applications/kitty.app" ]; then
   echo "installing kitty…"
   brew install --cask kitty
+fi
+# The window is a `kitten panel`, which needs kitty 0.42 or newer.
+KITTEN=""
+for k in /Applications/kitty.app/Contents/MacOS/kitten "$HOME/Applications/kitty.app/Contents/MacOS/kitten"; do
+  if [ -x "$k" ]; then KITTEN=$k; break; fi
+done
+if [ -z "$KITTEN" ] || ! "$KITTEN" panel --help >/dev/null 2>&1; then
+  echo "kitty 0.42 or newer is needed (kitten panel); upgrade with:  brew upgrade --cask kitty" >&2
+  exit 1
 fi
 if [ ! -d /Applications/Hammerspoon.app ]; then
   echo "installing Hammerspoon…"
@@ -47,9 +57,16 @@ sys.exit(0 if "seekr" in str(p.get("CommandString", "")) else 1)' \
     && echo "removed the old Terminal profile 'seekr'" || true
 fi
 # End a resident seekr from a previous install too, so the next Ctrl+Space
-# starts the freshly installed binary (its kitty window closes with it).
+# starts the freshly installed binary (its kitty window closes with it). seekr
+# itself first, by the pid it advertises: ending kitty before seekr leaves
+# seekr spinning on a dead pty. The pkill catches one without a state file.
+STATE="$HOME/Library/Application Support/seekr/resident.json"
+if [ -f "$STATE" ]; then
+  RESIDENT=$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$STATE")
+  [ -n "$RESIDENT" ] && kill -TERM "$RESIDENT" 2>/dev/null && sleep 1 || true
+fi
 pkill -TERM -f -- 'seekr --resident' 2>/dev/null || true
-rm -f "$HOME/Library/Application Support/seekr/resident.json"
+rm -f "$STATE"
 
 # (Re)start Hammerspoon so it picks up the config. The `hs` CLI is avoided on
 # purpose: Gatekeeper kills it while the app is still quarantined.
@@ -67,7 +84,7 @@ cat <<MSG
 seekr launcher installed.
   hotkey:    ctrl+space (again while seekr is in front: hide, query kept)
   config:    ~/.hammerspoon/seekr.lua, ~/.config/seekr/kitty.conf
-  runs:      $SEEKR_BIN --resident (inside kitty)
+  runs:      $SEEKR_BIN --resident (inside a kitty panel)
 
 First time only: macOS will ask you to allow Hammerspoon under
 System Settings › Privacy & Security › Accessibility (global hotkeys, window placement).
