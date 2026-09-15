@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{
     MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::SetTitle;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -143,6 +144,10 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    if resident {
+        // The launcher tells this window from others by its title.
+        let _ = execute!(std::io::stdout(), SetTitle("seekr"));
+    }
     // Own the mouse: otherwise the wheel scrolls the terminal's own buffer and
     // the UI slides out of view. Wheel events move the selection instead.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);

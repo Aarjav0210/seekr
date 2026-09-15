@@ -13,11 +13,18 @@
 -- seekr is told with SIGUSR2 so it keeps the text and shows it selected on the
 -- next reveal: typing replaces it, an arrow key keeps it.
 --
--- kitty is started as a process of its own just for seekr (config in
--- contrib/kitty/seekr.conf), so hiding and revealing is plain app hide/unhide
--- on that one process: instant, and it never touches other terminal windows.
--- Terminal.app was used before; it cannot drop its title bar and hiding one of
--- its windows needed AppleScript (see git history).
+-- The window is a kitty *panel* (`kitten panel`, kitty 0.42 or newer), started
+-- as a process of its own just for seekr (config in contrib/kitty/seekr.conf),
+-- so hiding and revealing is plain app hide/unhide on that one process:
+-- instant, and it never touches other terminal windows. A panel, unlike a
+-- regular kitty window, is on every desktop (Space) at once, so it comes back
+-- on whichever desktop is in front. A regular window stays on the desktop it
+-- was created on and macOS switches there when it gets focus; Hammerspoon's
+-- hs.spaces.moveWindowToSpace reports success but does nothing on macOS 15.
+-- Which *screen* it appears on is our job: the screen of the window that had
+-- focus when the hotkey was pressed, or the mouse's screen if none had.
+-- Terminal.app was used before kitty; it cannot drop its title bar and hiding
+-- one of its windows needed AppleScript (see git history).
 --
 -- Install: contrib/install-launcher.sh (copies this file to ~/.hammerspoon and
 -- adds `require("seekr")` to init.lua).
@@ -27,7 +34,7 @@ local M = {}
 local HOME = os.getenv("HOME")
 
 M.hotkey = { { "ctrl" }, "space" }
-M.maxSize = { w = 1100, h = 600 } -- pixels; shrinks on small screens
+M.maxSize = { w = 1100, h = 600 } -- text area in pixels; shrinks on small screens
 M.config = HOME .. "/.config/seekr/kitty.conf"
 -- Written by `seekr --resident` as {"pid": N, "park": "USR2"}; deleted when it
 -- exits. "park" names the signal that tells seekr "the launcher hid you"; older
@@ -42,11 +49,12 @@ local function firstExisting(paths)
   return nil
 end
 
-M.terminal = firstExisting({
-  "/Applications/kitty.app/Contents/MacOS/kitty",
-  HOME .. "/Applications/kitty.app/Contents/MacOS/kitty",
-  "/opt/homebrew/bin/kitty",
-  "/usr/local/bin/kitty",
+-- kitty's `kitten` binary; `kitten panel` is what opens the window.
+M.kitten = firstExisting({
+  "/Applications/kitty.app/Contents/MacOS/kitten",
+  HOME .. "/Applications/kitty.app/Contents/MacOS/kitten",
+  "/opt/homebrew/bin/kitten",
+  "/usr/local/bin/kitten",
 })
 M.seekr = firstExisting({
   HOME .. "/.cargo/bin/seekr",
@@ -54,10 +62,15 @@ M.seekr = firstExisting({
   "/usr/local/bin/seekr",
 })
 
+-- Panels run under kitty's background-only quick-access bundle. The plain kitty
+-- bundle covers a resident started by an older version of this file.
+local BUNDLES = { "net.kovidgoyal.kitty-quick-access", "net.kovidgoyal.kitty" }
+
 M._task = nil       -- hs.task of the kitty process we started
 M._launching = nil  -- hs.timer while a window is being created; guards against double launches
 M._startedAt = nil  -- when the current show began; M.lastLatency holds hotkey → window placed, in seconds
 M._prevWindow = nil -- window that had focus before seekr was shown; focus returns there on hide
+M._screen = nil     -- screen the user was on when the hotkey was pressed; the window goes there
 
 local function log(fmt, ...)
   if not M.debug then return end
@@ -74,9 +87,11 @@ local function app()
     if a then return a end
   end
   -- Hammerspoon was reloaded while seekr kept running: find the window by title.
-  for _, a in ipairs(hs.application.applicationsForBundleID("net.kovidgoyal.kitty")) do
-    for _, w in ipairs(a:allWindows()) do
-      if w:title() == "seekr" then return a end
+  for _, bundle in ipairs(BUNDLES) do
+    for _, a in ipairs(hs.application.applicationsForBundleID(bundle)) do
+      for _, w in ipairs(a:allWindows()) do
+        if w:title() == "seekr" then return a end
+      end
     end
   end
   return nil
@@ -88,16 +103,33 @@ local function windowOf(a)
   return a:allWindows()[1]
 end
 
-local function place(w)
-  local s = hs.screen.mainScreen():frame()
-  local width = math.min(M.maxSize.w, math.floor(s.w * 0.72))
-  local height = math.min(M.maxSize.h, math.floor(s.h * 0.55))
-  w:setFrame({
-    x = s.x + math.floor((s.w - width) / 2),
+-- The screen the window belongs on: where the user was at the hotkey (see
+-- show), else the screen with keyboard focus.
+local function targetScreen()
+  return M._screen or hs.screen.mainScreen()
+end
+
+-- Size of the text area for a screen of frame `s`. A panel's size is fixed
+-- when it is created (kitty ignores later resize requests), so this is only
+-- used at launch; the window ends up this plus its padding.
+local function textSize(s)
+  return {
+    w = math.min(M.maxSize.w, math.floor(s.w * 0.72)),
+    h = math.min(M.maxSize.h, math.floor(s.h * 0.55)),
+  }
+end
+
+-- Top-left corner for a window `size` wide on a screen of frame `s`: centred,
+-- a little above the middle.
+local function topLeft(s, size)
+  return {
+    x = s.x + math.floor((s.w - size.w) / 2),
     y = s.y + math.floor(s.h * 0.16),
-    w = width,
-    h = height,
-  }, 0)
+  }
+end
+
+local function place(w)
+  w:setTopLeft(topLeft(targetScreen():frame(), w:size()))
 end
 
 local function adopt(w)
@@ -149,30 +181,50 @@ local function awaitWindow(pick)
       M._launching:stop()
       M._launching = nil
       log("awaitWindow: %s after %d tries", w and "adopting" or "gave up", tries)
-      if w then adopt(w) end
+      if w then
+        adopt(w)
+        hs.timer.doAfter(0.4, function() place(w) end) -- see launch()
+      end
     end
   end)
 end
 
 local function launch()
-  if not M.terminal or not M.seekr then
-    hs.alert.show("seekr: kitty or seekr not found; run contrib/install-launcher.sh")
+  if not M.kitten or not M.seekr then
+    hs.alert.show("seekr: kitten (kitty 0.42+) or seekr not found; run contrib/install-launcher.sh")
     return
   end
-  M._task = hs.task.new(M.terminal, function() M._task = nil end, {
-    "--config", M.config,
-    "--title", "seekr",
+  -- The size is fixed here (see textSize). kitty places the window itself a
+  -- moment after creating it, overriding anything done to it before, so it is
+  -- asked for the spot adopt() would pick (margins are measured from the top
+  -- left of the screen's usable area); place() then runs once more after kitty
+  -- is done, which matters when that is not the screen the user is on. The
+  -- window level (regular, not the desktop-widget level panels default to) is
+  -- set in the kitty config.
+  local s = targetScreen():frame()
+  local size = textSize(s)
+  local at = topLeft(s, size)
+  M._task = hs.task.new(M.kitten, function() M._task = nil end, {
+    "panel",
+    "--edge=none",
+    "--margin-left=" .. math.floor(at.x - s.x),
+    "--margin-top=" .. math.floor(at.y - s.y),
+    "--columns=" .. size.w .. "px",
+    "--lines=" .. size.h .. "px",
+    "--layer=top",
+    "--focus-policy=on-demand",
+    "--config=" .. M.config,
     M.seekr, "--resident",
   })
   M._task:start()
-  log("launch: kitty pid %s", tostring(M._task:pid()))
+  log("launch: kitten pid %s", tostring(M._task:pid()))
   awaitWindow(function()
     local a = app()
     return a and windowOf(a)
   end)
 end
 
--- Bring the hidden window back on the current space. Returns false if there is none.
+-- Bring the hidden window back. Returns false if there is none.
 local function reveal()
   local a = app()
   if not a then return false end
@@ -180,13 +232,6 @@ local function reveal()
   a:unhide()
   local w = windowOf(a)
   if not w then return false end
-  pcall(function()
-    local here = hs.spaces.focusedSpace()
-    local there = hs.spaces.windowSpaces(w)
-    if here and there and there[1] and there[1] ~= here then
-      hs.spaces.moveWindowToSpace(w, here)
-    end
-  end)
   adopt(w)
   return true
 end
@@ -221,6 +266,8 @@ function M.show()
   end
   M._startedAt = hs.timer.secondsSinceEpoch()
   if focused then M._prevWindow = focused end
+  -- Where the user is: the focused window's screen, else the mouse's.
+  M._screen = (focused and focused:screen()) or hs.mouse.getCurrentScreen()
   if reveal() then return end
   launch()
 end
