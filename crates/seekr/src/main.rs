@@ -80,6 +80,24 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List the apps a query can be handed to (⇥ in the finder): Arc and Spotify by default.
+    Searches {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search inside an app: `seekr search-in spotify daft punk`. Without terms, opens the app.
+    SearchIn {
+        /// Keyword of the search; `seekr searches` lists them.
+        keyword: String,
+        /// What to search for.
+        terms: Vec<String>,
+        /// Print the URL instead of opening it.
+        #[arg(long)]
+        print: bool,
+        /// Emit JSON: keyword, name, app, terms, url and the `open` command.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -99,5 +117,12 @@ fn main() -> Result<()> {
         Some(Cmd::Index { full, json }) => cli::index(full, json),
         Some(Cmd::Doctor { json }) => cli::doctor(json),
         Some(Cmd::Kinds { json }) => cli::kinds(json),
+        Some(Cmd::Searches { json }) => cli::searches(json),
+        Some(Cmd::SearchIn {
+            keyword,
+            terms,
+            print,
+            json,
+        }) => cli::search_in(&keyword, &terms.join(" "), print, json),
     }
 }

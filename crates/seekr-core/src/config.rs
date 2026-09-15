@@ -1,5 +1,6 @@
+use crate::app_search::{self, AppSearch};
 use crate::item::expand_tilde;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +24,9 @@ pub struct Config {
     /// Kinds that are only loaded into the matcher when explicitly scoped
     /// (e.g. `code:`). Keeps the default view small and fast.
     pub lazy_kinds: Vec<String>,
+    /// Apps that Tab hands the query to (`arc`, `spotify`). See [`AppSearch`];
+    /// setting this replaces the built-in list.
+    pub searches: Vec<AppSearch>,
 }
 
 impl Default for Config {
@@ -102,6 +106,7 @@ impl Default for Config {
             respect_gitignore: true,
             refresh_on_launch: true,
             lazy_kinds: vec!["code".to_string()],
+            searches: AppSearch::builtin(),
         }
     }
 }
@@ -149,6 +154,8 @@ impl Config {
                 .with_context(|| format!("reading {}", path.display()))?;
             let cfg: Config =
                 toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+            cfg.validate()
+                .with_context(|| format!("in {}", path.display()))?;
             Ok(cfg)
         } else {
             let cfg = Config::default();
@@ -160,12 +167,40 @@ impl Config {
         }
     }
 
+    /// App searches must have usable keywords and templates; see [`AppSearch::validate`].
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.searches {
+            s.validate()?;
+            if !seen.insert(s.keyword.to_ascii_lowercase()) {
+                bail!("app search keyword {:?} is listed twice", s.keyword);
+            }
+        }
+        Ok(())
+    }
+
     /// A commented-out config showing every option with its current default.
     pub fn template(&self) -> String {
         fn arr(v: &[String]) -> String {
             let items: Vec<toml::Value> = v.iter().map(|s| toml::Value::String(s.clone())).collect();
             toml::Value::Array(items).to_string()
         }
+        // One commented `[[searches]]` table per built-in search.
+        let searches = self
+            .searches
+            .iter()
+            .map(|s| {
+                let body = toml::to_string(s).unwrap_or_default();
+                let mut block = String::from("# [[searches]]\n");
+                for line in body.lines() {
+                    block.push_str("# ");
+                    block.push_str(line);
+                    block.push('\n');
+                }
+                block
+            })
+            .collect::<Vec<_>>()
+            .join("#\n");
         format!(
             "# seekr configuration. Every key is optional; unset keys use the built-in\n\
              # defaults shown below. Uncomment a line to override it. `~` is expanded.\n\
@@ -190,7 +225,15 @@ impl Config {
              # refresh_on_launch = {rol}\n\
              \n\
              # Kinds only loaded into the matcher when explicitly scoped (e.g. `code:`).\n\
-             # lazy_kinds = {lazy}\n",
+             # lazy_kinds = {lazy}\n\
+             \n\
+             # Apps that Tab hands the query to: select the app (or type its keyword),\n\
+             # press Tab, type the terms, Enter. `{{query}}` is replaced by the\n\
+             # percent-encoded terms; `app` is the bundle id that must open the URL\n\
+             # (`osascript -e 'id of app \"Arc\"'` prints it). Only apps with a URL scheme,\n\
+             # or browsers, can be searched this way. Setting this replaces the whole\n\
+             # list, so keep the entries you still want.\n\
+             {searches}",
             roots = arr(&self.roots),
             app_dirs = arr(&self.app_dirs),
             skip = arr(&self.skip_dirs),
@@ -198,6 +241,7 @@ impl Config {
             gi = self.respect_gitignore,
             rol = self.refresh_on_launch,
             lazy = arr(&self.lazy_kinds),
+            searches = searches,
         )
     }
 
@@ -219,5 +263,54 @@ impl Config {
 
     pub fn is_lazy(&self, kind: crate::Kind) -> bool {
         self.lazy_kinds.iter().any(|k| k == kind.as_str())
+    }
+
+    /// The app search whose keyword is `word` (`arc`), case-insensitively.
+    pub fn search_by_keyword(&self, word: &str) -> Option<&AppSearch> {
+        app_search::by_keyword(&self.searches, word)
+    }
+
+    /// The app search attached to the app with this bundle identifier.
+    pub fn search_for_app(&self, bundle_id: &str) -> Option<&AppSearch> {
+        app_search::for_app(&self.searches, bundle_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn searches_in_the_template_parse_back_to_the_builtins() {
+        let toml_text: String = Config::default()
+            .template()
+            .lines()
+            .skip_while(|l| !l.starts_with("# [[searches]]"))
+            .filter_map(|l| l.strip_prefix("# "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg: Config = toml::from_str(&toml_text).unwrap();
+        assert_eq!(cfg.searches, AppSearch::builtin());
+    }
+
+    #[test]
+    fn a_config_without_searches_keeps_the_builtins() {
+        let cfg: Config = toml::from_str("max_depth = 3").unwrap();
+        assert_eq!(cfg.max_depth, 3);
+        assert_eq!(cfg.searches, AppSearch::builtin());
+    }
+
+    #[test]
+    fn a_searches_list_replaces_the_builtins_and_is_validated() {
+        let text = "[[searches]]\nkeyword = \"yt\"\nurl = \"https://youtube.com/results?search_query={query}\"\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.searches.len(), 1);
+        assert_eq!(cfg.searches[0].name(), "yt");
+        assert!(cfg.searches[0].app.is_none());
+        let dup = format!("{text}{text}");
+        assert!(toml::from_str::<Config>(&dup).unwrap().validate().is_err());
+        let scope = "[[searches]]\nkeyword = \"doc\"\nurl = \"x{query}\"\n";
+        assert!(toml::from_str::<Config>(scope).unwrap().validate().is_err());
     }
 }

@@ -7,9 +7,11 @@
 //! - [`index::Index`]: SQLite-backed persistent index + usage (frecency) log.
 //! - [`search::Searcher`]: incremental fuzzy matching (nucleo) with kind/frecency-aware re-ranking.
 //! - [`actions`]: open / reveal / copy, the primitive "tools".
+//! - [`app_search::AppSearch`]: "Tab to search" — hand the query to Arc, Spotify, …
 //! - [`doctor`]: diagnostics for Spotlight and our own index.
 
 pub mod actions;
+pub mod app_search;
 pub mod config;
 pub mod doctor;
 pub mod index;
@@ -19,6 +21,7 @@ pub mod providers;
 pub mod query;
 pub mod search;
 
+pub use app_search::AppSearch;
 pub use config::Config;
 pub use index::{Index, Usage};
 pub use item::{Item, Kind};

@@ -1,4 +1,5 @@
 //! Primitive actions on items. These are the "tools" a higher layer (TUI, CLI, AI agent) composes.
+use crate::app_search::AppSearch;
 use crate::index::{Index, Usage};
 use crate::item::Item;
 use anyhow::{bail, Context, Result};
@@ -97,6 +98,30 @@ pub fn perform(action: Action, item: &Item, idx: Option<&Index>) -> Result<Optio
         }
     }
     Ok(None)
+}
+
+/// Open a URL with the app that owns `bundle_id`, or with whatever handles its scheme.
+pub fn open_url(url: &str, bundle_id: Option<&str>) -> Result<()> {
+    match bundle_id {
+        Some(b) => run("open", &["-b", b, url]),
+        None => run("open", &[url]),
+    }
+}
+
+/// Launch, or bring forward, the app with this bundle identifier.
+pub fn open_app(bundle_id: &str) -> Result<()> {
+    run("open", &["-b", bundle_id])
+}
+
+/// Hand `terms` to an app: open its search URL, or just the app when there is
+/// nothing to search for (see [`AppSearch::open_args`]).
+pub fn app_search(search: &AppSearch, terms: &str) -> Result<()> {
+    let args = search.open_args(terms);
+    if args.is_empty() {
+        bail!("nothing to search for");
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    run("open", &args)
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<()> {
