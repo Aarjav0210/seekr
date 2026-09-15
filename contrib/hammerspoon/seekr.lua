@@ -191,15 +191,22 @@ local function reveal()
   return true
 end
 
--- Called by seekr (via the `hs` CLI) after Enter/Esc: hide the window, keep the process.
-function M.hide()
+-- Called by seekr (via the `hs` CLI) after Enter/Esc: hide the window, keep the
+-- process. Focus goes back to the window that was in front before seekr unless
+-- restoreFocus is false: seekr passes that after opening something, so the app
+-- `open` just brought forward stays there instead of being pushed behind the
+-- previous one a moment later. No argument (Esc, the Ctrl+Space toggle, older
+-- binaries) means restore.
+function M.hide(restoreFocus)
+  if restoreFocus == nil then restoreFocus = true end
   local a = app()
-  log("hide: app=%s prev=%s", a and a:pid() or "nil", M._prevWindow and M._prevWindow:title() or "nil")
+  log("hide: app=%s prev=%s restore=%s", a and a:pid() or "nil",
+    M._prevWindow and M._prevWindow:title() or "nil", tostring(restoreFocus))
   if not a then return end
   a:hide()
   local prev = M._prevWindow
   M._prevWindow = nil
-  if prev and pcall(function() return prev:isVisible() end) then prev:focus() end
+  if restoreFocus and prev and pcall(function() return prev:isVisible() end) then prev:focus() end
 end
 
 -- Ctrl+Space: reveal seekr, or hide it again when it already has focus.

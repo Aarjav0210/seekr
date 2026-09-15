@@ -1,10 +1,12 @@
 //! Non-interactive subcommands.
 use crate::loader;
 use crate::util::{human_size, relative_time};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use seekr_core::actions::{self, Action};
+use seekr_core::providers::apps;
 use seekr_core::search::kinds_for_query;
-use seekr_core::{doctor, indexer, Config, Index, Item, Kind, Query, Searcher};
+use seekr_core::{doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Result<()> {
@@ -213,5 +215,88 @@ pub fn kinds(json: bool) -> Result<()> {
         println!("{:<8} {:<14} {}: <terms>", k.as_str(), k.label(), k.as_str());
     }
     println!("\nfilters: in:<path-substring>   ext:<extension>");
+    let searches = Config::load()?.searches;
+    if !searches.is_empty() {
+        let kws: Vec<String> = searches.iter().map(|s| format!("{}:", s.keyword)).collect();
+        println!(
+            "app searches: {}   (⇥ in the finder; see `seekr searches`)",
+            kws.join(" ")
+        );
+    }
+    Ok(())
+}
+
+/// The configured app searches, and whether their apps are installed.
+pub fn searches(json: bool) -> Result<()> {
+    let cfg = Config::load()?;
+    let installed: HashSet<String> = apps::scan_app_dirs(&cfg)
+        .into_iter()
+        .filter_map(|a| a.bundle_id)
+        .collect();
+    if json {
+        let v: Vec<_> = cfg
+            .searches
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "keyword": s.keyword,
+                    "name": s.name(),
+                    "url": s.url,
+                    "app": s.app,
+                    "installed": s.app.as_ref().map(|b| installed.contains(b)),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let status = |s: &AppSearch| match &s.app {
+        Some(b) if installed.contains(b) => "installed",
+        Some(_) => "not installed",
+        None => "web",
+    };
+    println!("{:<10} {:<10} {:<14} {}", "keyword", "name", "app", "url");
+    for s in &cfg.searches {
+        println!("{:<10} {:<10} {:<14} {}", s.keyword, s.name(), status(s), s.url);
+    }
+    println!("\nfinder: select the app (or type its keyword) and press ⇥; shell: seekr search-in <keyword> <terms>");
+    println!("config: {} ([[searches]])", Config::config_path().display());
+    Ok(())
+}
+
+/// `seekr search-in spotify daft punk`: hand the terms to an app, or with
+/// `--print` just show what would be opened.
+pub fn search_in(keyword: &str, terms: &str, print: bool, json: bool) -> Result<()> {
+    let cfg = Config::load()?;
+    let Some(s) = cfg.search_by_keyword(keyword) else {
+        bail!("no app search named {keyword:?}; `seekr searches` lists them");
+    };
+    let terms = terms.trim();
+    let args = s.open_args(terms);
+    if args.is_empty() {
+        bail!("nothing to search for");
+    }
+    if !print {
+        actions::app_search(s, terms)?;
+    }
+    let url = (!terms.is_empty()).then(|| s.url_for(terms));
+    if json {
+        let command: Vec<String> = std::iter::once("open".to_string()).chain(args).collect();
+        let v = serde_json::json!({
+            "keyword": s.keyword,
+            "name": s.name(),
+            "app": s.app,
+            "terms": terms,
+            "url": url,
+            "command": command,
+            "opened": !print,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if print {
+        match url {
+            Some(u) => println!("{u}"),
+            None => println!("open {}", args.join(" ")),
+        }
+    }
     Ok(())
 }

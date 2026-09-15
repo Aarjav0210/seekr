@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use seekr_core::actions::{self, Action};
-use seekr_core::{Config, Hit, Index, Kind, Query, Searcher};
+use seekr_core::{AppSearch, Config, Hit, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,19 @@ const RESULT_LIMIT: usize = 200;
 /// Below this many columns the details pane is hidden.
 const COMPACT_WIDTH: u16 = 90;
 const SCOPE_CYCLE: [Option<Kind>; 4] = [None, Some(Kind::App), Some(Kind::Doc), Some(Kind::Folder)];
+/// Nerd Font magnifier, for the row that runs an app search.
+const SEARCH_GLYPH: &str = "\u{f002}";
+
+/// App-search mode (`arc: rust lifetimes`): the rest of the query goes to an
+/// app instead of being matched against the index.
+struct AppSearchMode {
+    target: AppSearch,
+    /// Everything after the keyword, verbatim.
+    terms: String,
+    /// The app's result row when the mode was entered from it: a search
+    /// through it counts as a use, like opening the app would.
+    app: Option<Item>,
+}
 
 struct App {
     cfg: Config,
@@ -57,6 +70,8 @@ struct App {
     /// Set by SIGTERM/SIGHUP so a resident process still restores the terminal and cleans up.
     terminate: Arc<AtomicBool>,
     last_refresh: Instant,
+    /// Set while the query starts with an app-search keyword (`arc: …`).
+    app_search: Option<AppSearchMode>,
 }
 
 /// Skip the wake-up refresh if one ran this recently.
@@ -115,6 +130,7 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         park: Arc::new(AtomicBool::new(false)),
         terminate: Arc::new(AtomicBool::new(false)),
         last_refresh: Instant::now(),
+        app_search: None,
     };
     app.set_input(initial);
     if resident {
@@ -231,13 +247,24 @@ impl App {
     fn set_input(&mut self, s: String) {
         self.input = s;
         self.input_selected = false;
-        let q = Query::parse(&self.input);
+        self.selected = 0;
+        self.dirty = true;
+        let mut q = Query::parse_with(&self.input, &self.cfg.searches);
+        if let Some(target) = q.app_search.take() {
+            // Nothing from the index is shown in this mode; the matcher keeps its last query.
+            let app = self.app_search.take().and_then(|m| m.app);
+            self.app_search = Some(AppSearchMode {
+                target,
+                terms: q.terms,
+                app,
+            });
+            return;
+        }
+        self.app_search = None;
         if let Some(k) = q.scope {
             self.ensure_kind_loaded(k);
         }
         self.searcher.set_query(q);
-        self.selected = 0;
-        self.dirty = true;
     }
 
     fn ensure_kind_loaded(&mut self, k: Kind) {
@@ -275,7 +302,9 @@ impl App {
     }
 
     /// Done with this interaction: quit, or in resident mode reset and hide.
-    fn dismiss(&mut self) {
+    /// `restore_focus` sends focus back to the app that was in front before
+    /// seekr (Esc); after opening something, the opened app keeps it instead.
+    fn dismiss(&mut self, restore_focus: bool) {
         if !self.resident {
             self.quit = true;
             return;
@@ -284,7 +313,7 @@ impl App {
         self.status = None;
         self.hidden = true;
         self.final_draw = true;
-        if !launcher::hide_window() {
+        if !launcher::hide_window(restore_focus) {
             // No Hammerspoon to park us: behave like a normal one-shot run.
             self.quit = true;
         }
@@ -345,7 +374,8 @@ impl App {
             }
         }
         if quit_after {
-            self.dismiss();
+            // The opened app has the focus now; the launcher must not hand it back.
+            self.dismiss(false);
         } else {
             self.flash(format!("{} ✓", action.label()));
         }
@@ -365,6 +395,105 @@ impl App {
             .unwrap_or(0);
         let new = self.input[..cut].to_string();
         self.set_input(new);
+    }
+
+    /// ⇥: hand the query to the selected app's search (or to the search whose
+    /// keyword was typed); with neither, cycle the scope as before.
+    fn tab(&mut self) {
+        if self.app_search.is_some() {
+            return;
+        }
+        match self.search_for_selection() {
+            Some((target, app)) => {
+                self.set_input(format!("{}: ", target.keyword));
+                if let Some(m) = self.app_search.as_mut() {
+                    m.app = app;
+                }
+            }
+            None => self.cycle_scope(),
+        }
+    }
+
+    /// The app search ⇥ would enter, with the app's own row when it is known:
+    /// the selected app's search, else the one whose keyword is the query.
+    fn search_for_selection(&self) -> Option<(AppSearch, Option<Item>)> {
+        if let Some(h) = self.selected_hit() {
+            if h.item.kind == Kind::App {
+                if let Some(s) = h
+                    .item
+                    .bundle_id
+                    .as_deref()
+                    .and_then(|b| self.cfg.search_for_app(b))
+                {
+                    return Some((s.clone(), Some(h.item.clone())));
+                }
+            }
+        }
+        let s = self
+            .cfg
+            .search_by_keyword(self.searcher.query().terms.trim())?;
+        let app = self
+            .hits
+            .iter()
+            .map(|h| &h.item)
+            .find(|i| i.kind == Kind::App && i.bundle_id == s.app)
+            .cloned();
+        Some((s.clone(), app))
+    }
+
+    /// Keys that mean something else while an app search is being typed.
+    /// Returns false to fall through to the usual handling (typing, esc, ^w, ^u, ^c).
+    fn handle_search_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let Some(mode) = &self.app_search else {
+            return false;
+        };
+        let nothing_typed = mode.terms.is_empty();
+        let keyword = mode.target.keyword.clone();
+        let url = mode.target.url_for(&mode.terms);
+        match (code, ctrl) {
+            (KeyCode::Enter, _) => self.run_app_search(),
+            // Nothing typed yet: ⌫ steps out of the search and leaves the keyword.
+            (KeyCode::Backspace, _) if nothing_typed => self.set_input(keyword),
+            (KeyCode::Char('y'), true) => match actions::copy_to_clipboard(&url) {
+                Ok(()) => self.flash("Copy URL ✓"),
+                Err(e) => self.flash(format!("Copy URL: {e}")),
+            },
+            // There is no list here: selection, scope and item actions are inert.
+            (
+                KeyCode::Tab
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End,
+                _,
+            ) => {}
+            (KeyCode::Char('r' | 'o' | 'e' | 'v' | 'n' | 'p' | 'j' | 'k' | 'd'), true) => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// ⏎ in app-search mode: open the URL (or just the app when nothing was
+    /// typed), count it as a use of the app, and dismiss.
+    fn run_app_search(&mut self) {
+        let Some(mode) = &self.app_search else {
+            return;
+        };
+        let (target, terms, app) = (mode.target.clone(), mode.terms.clone(), mode.app.clone());
+        if let Err(e) = actions::app_search(&target, &terms) {
+            self.flash(format!("{}: {e}", target.name()));
+            return;
+        }
+        if let Some(app) = app {
+            if let Ok(usage) = self.idx.record_use(&app.path) {
+                self.searcher.record_use(&app, usage);
+            }
+        }
+        // The app now shows the search and has the focus; the launcher must not hand it back.
+        self.dismiss(false);
     }
 
     fn cycle_scope(&mut self) {
@@ -438,12 +567,15 @@ impl App {
                 _ => {}
             }
         }
+        if self.app_search.is_some() && self.handle_search_key(code, mods) {
+            return Ok(());
+        }
         match (code, ctrl) {
             (KeyCode::Char('c'), true) | (KeyCode::Char('g'), true) => self.quit = true,
             // Spotlight convention: esc clears the query first, a second esc dismisses.
             (KeyCode::Esc, _) => {
                 if self.input.is_empty() {
-                    self.dismiss();
+                    self.dismiss(true);
                 } else {
                     self.clear_input();
                     self.flash("cleared · esc again to quit");
@@ -457,7 +589,7 @@ impl App {
             (KeyCode::Char('y'), true) => self.act(Action::CopyPath, false)?,
             (KeyCode::Char('v'), true) => self.act(Action::QuickLook, false)?,
             (KeyCode::Char('x'), true) => self.refresh_index(true),
-            (KeyCode::Tab, _) => self.cycle_scope(),
+            (KeyCode::Tab, _) => self.tab(),
             (KeyCode::Down, _) | (KeyCode::Char('n'), true) | (KeyCode::Char('j'), true) => {
                 self.move_sel(1)
             }
@@ -548,12 +680,11 @@ fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let q = app.searcher.query();
-    let filters = q.describe_filters();
-    let title = if filters.is_empty() {
-        String::from(" seekr ")
-    } else {
-        format!(" seekr · {filters} ")
+    let filters = app.searcher.query().describe_filters();
+    let title = match &app.app_search {
+        Some(m) => format!(" seekr · search {} ", m.target.name()),
+        None if filters.is_empty() => String::from(" seekr "),
+        None => format!(" seekr · {filters} "),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -562,38 +693,75 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let area = inner;
-    let prompt = Span::styled("❯ ", Style::default().fg(Color::Cyan).bold());
-    let text = if app.input_selected {
-        Span::styled(
-            app.input.as_str(),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        )
-    } else {
-        Span::raw(app.input.as_str())
-    };
-    let hint = if app.input.is_empty() {
-        Span::styled(
-            "type to search · app: doc: dir: in: ext: · ⇥ cycles scope",
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::raw("")
-    };
-    f.render_widget(Paragraph::new(Line::from(vec![prompt, text, hint])), area);
-    let text_end = area.x + 2 + app.input.chars().count() as u16;
-    if !app.input.is_empty() {
-        let tip = if app.input_selected {
-            "type to replace · → keeps · esc clear "
+    let dim = Style::default().fg(Color::DarkGray);
+    let selected = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let mut spans = vec![Span::styled("❯ ", Style::default().fg(Color::Cyan).bold())];
+    let mut width = 2usize;
+    match &app.app_search {
+        Some(m) => {
+            // The keyword becomes a chip; what follows it is shown as typed.
+            let chip = format!("{} ›", m.target.name());
+            width += chip.chars().count() + 1 + m.terms.chars().count();
+            spans.push(Span::styled(
+                chip,
+                if app.input_selected {
+                    selected
+                } else {
+                    Style::default().fg(Color::Cyan).bold()
+                },
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(if app.input_selected {
+                Span::styled(m.terms.clone(), selected)
+            } else {
+                Span::raw(m.terms.clone())
+            });
+            if m.terms.is_empty() {
+                spans.push(Span::styled(
+                    format!("type to search in {}", m.target.name()),
+                    dim,
+                ));
+            }
+        }
+        None => {
+            width += app.input.chars().count();
+            spans.push(if app.input_selected {
+                Span::styled(app.input.as_str(), selected)
+            } else {
+                Span::raw(app.input.as_str())
+            });
+            if app.input.is_empty() {
+                spans.push(Span::styled(
+                    "type to search · app: doc: dir: in: ext: · ⇥ cycles scope",
+                    dim,
+                ));
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let text_end = area.x + width as u16;
+    let tip: Option<String> = if app.input.is_empty() {
+        None
+    } else if app.input_selected {
+        Some("type to replace · → keeps · esc clear ".into())
+    } else if let Some(m) = &app.app_search {
+        Some(if !m.terms.is_empty() {
+            "⏎ search · ^y copy url · esc clear ".into()
+        } else if m.target.app.is_some() {
+            format!("⏎ opens {} · ⌫ back · esc clear ", m.target.name())
         } else {
-            "esc clear · ^w delete word "
-        };
+            "type something · ⌫ back · esc clear ".into()
+        })
+    } else if let Some((s, _)) = app.search_for_selection() {
+        Some(format!("⇥ search in {} · esc clear ", s.name()))
+    } else {
+        Some("esc clear · ^w delete word ".into())
+    };
+    if let Some(tip) = tip {
         let tip_w = tip.chars().count() as u16;
         if area.right() > tip_w + 3 && text_end + 3 < area.right() - tip_w {
             let tip_area = Rect::new(area.right() - tip_w, area.y, tip_w, 1);
-            f.render_widget(
-                Paragraph::new(Span::styled(tip, Style::default().fg(Color::DarkGray))),
-                tip_area,
-            );
+            f.render_widget(Paragraph::new(Span::styled(tip, dim)), tip_area);
         }
     }
     f.set_cursor_position(Position::new(text_end.min(area.right().saturating_sub(1)), area.y));
@@ -611,6 +779,10 @@ fn results_block(app: &App) -> Block<'static> {
 }
 
 fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
+    if let Some(m) = &app.app_search {
+        draw_app_search(f, area, m);
+        return;
+    }
     if app.input.trim().is_empty() {
         draw_home(f, area, app);
         return;
@@ -678,6 +850,53 @@ fn result_item(h: &Hit, width: usize) -> ListItem<'static> {
     ListItem::new(Line::from(spans))
 }
 
+/// App-search mode: the one thing ⏎ will do, in place of the result list.
+fn draw_app_search(f: &mut Frame, area: Rect, m: &AppSearchMode) {
+    let name = m.target.name();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {name} "))
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let dim = Style::default().fg(Color::DarkGray);
+    let glyph = Span::styled(format!("{SEARCH_GLYPH} "), Style::default().fg(Color::Cyan));
+    let terms = m.terms.trim();
+    let (head, detail) = if terms.is_empty() {
+        let head = if m.target.app.is_some() {
+            format!("Open {name}")
+        } else {
+            format!("Search {name}")
+        };
+        (
+            Line::from(vec![glyph, Span::raw(head)]),
+            Line::from(Span::styled("  type what to search for", dim)),
+        )
+    } else {
+        let room = inner.width.saturating_sub(6) as usize;
+        (
+            Line::from(vec![
+                glyph,
+                Span::raw(format!("Search {name} for ")),
+                Span::styled(format!("\"{terms}\""), Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(Span::styled(
+                format!("  {}", ellipsize(&m.target.url_for(terms), room)),
+                dim,
+            )),
+        )
+    };
+    let list = List::new(vec![ListItem::new(vec![head, detail])])
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 44, 52))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+    let mut state = ListState::default().with_selected(Some(0));
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
 /// Empty query: the wordmark, a hint, and the most used items underneath.
 fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
     let block = results_block(app);
@@ -695,7 +914,7 @@ fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::Cyan);
-    let hints = [
+    let mut hints = vec![
         Line::from(vec![
             Span::styled("type to find apps, documents, folders and media", dim),
         ]),
@@ -714,6 +933,16 @@ fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(" cycles scope", dim),
         ]),
     ];
+    if !app.cfg.searches.is_empty() {
+        let names: Vec<&str> = app.cfg.searches.iter().map(|s| s.name()).collect();
+        hints.push(Line::from(vec![
+            Span::styled("⇥", key),
+            Span::styled(
+                format!(" on {} searches inside the app", names.join(" or ")),
+                dim,
+            ),
+        ]));
+    }
     for (i, line) in hints.into_iter().enumerate() {
         let w = line.width() as u16;
         let hx = inner.x + (inner.width.saturating_sub(w)) / 2;
@@ -803,9 +1032,43 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(Color::DarkGray));
     let now = seekr_core::now_secs();
     let mut lines: Vec<Line> = Vec::new();
-    if let Some(h) = app.selected_hit() {
+    let label = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Cyan);
+    if let Some(m) = &app.app_search {
+        let name = m.target.name();
+        lines.push(Line::from(Span::styled(
+            format!("Search {name}"),
+            Style::default().fg(Color::Cyan).bold(),
+        )));
+        if let Some(b) = &m.target.app {
+            lines.push(Line::from(vec![
+                Span::styled("app    ", label),
+                Span::raw(b.clone()),
+            ]));
+        }
+        let url = if m.terms.trim().is_empty() {
+            m.target.url.clone()
+        } else {
+            m.target.url_for(&m.terms)
+        };
+        lines.push(Line::from(vec![Span::styled("url    ", label), Span::raw(url)]));
+        lines.push(Line::from(""));
+        let enter = if m.target.app.is_some() {
+            "search · with nothing typed, open the app"
+        } else {
+            "search"
+        };
+        lines.push(Line::from(vec![Span::styled("⏎ ", key), Span::raw(enter)]));
+        lines.push(Line::from(vec![
+            Span::styled("^y ", key),
+            Span::raw("copy url  "),
+            Span::styled("⌫ ", key),
+            Span::raw("back when empty  "),
+            Span::styled("esc ", key),
+            Span::raw("clear"),
+        ]));
+    } else if let Some(h) = app.selected_hit() {
         let it = &h.item;
-        let label = Style::default().fg(Color::DarkGray);
         lines.push(Line::from(vec![Span::styled(
             it.name.clone(),
             Style::default().fg(kind_color(it.kind)).bold(),
@@ -841,6 +1104,16 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
         lines.push(Line::from(""));
+        if let Some(s) = it
+            .bundle_id
+            .as_deref()
+            .and_then(|b| app.cfg.search_for_app(b))
+        {
+            lines.push(Line::from(vec![
+                Span::styled("⇥ ", key),
+                Span::raw(format!("search in {}", s.name())),
+            ]));
+        }
         lines.push(Line::from(vec![
             Span::styled("⏎ ", Style::default().fg(Color::Cyan)),
             Span::raw("open    "),
@@ -912,9 +1185,11 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(" ready ", Style::default().fg(Color::Green)));
     }
     let esc = if app.resident { "esc clear/hide · ^c quit" } else { "esc clear/quit" };
-    spans.push(Span::styled(
-        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ scope · ^x refresh · {esc}"),
-        Style::default().fg(Color::DarkGray),
-    ));
+    let keys = if app.app_search.is_some() {
+        format!("  ⏎ search · ^y copy url · ⌫ back · {esc}")
+    } else {
+        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh · {esc}")
+    };
+    spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }

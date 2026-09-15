@@ -3,7 +3,8 @@
 //! In resident mode one seekr stays alive in a parked Terminal window, so the
 //! hotkey only has to reveal it: the UI is on screen in a couple of frames and
 //! typing works immediately. Hiding is Hammerspoon's job (it owns window
-//! placement and restores focus to the previous app); seekr just asks for it.
+//! placement and, after Esc, hands focus back to the previous app; after Enter
+//! the app that was just opened keeps it); seekr just asks for it.
 //! Hammerspoon in turn sends SIGUSR1 when it reveals the window, which seekr
 //! treats as "wake up and refresh in the background", and SIGUSR2 when the
 //! hotkey hid the window behind seekr's back (Ctrl+Space while seekr had focus),
@@ -31,18 +32,27 @@ pub fn clear_state() {
     let _ = std::fs::remove_file(state_path());
 }
 
-const LUA_HIDE: &str = "package.loaded.seekr.hide()";
-
-/// Ask Hammerspoon to park the launcher window. The `hs` CLI answers in a few
-/// milliseconds; AppleScript is the slower fallback. Returns false when neither
-/// route works (no Hammerspoon), in which case the caller should quit instead.
-pub fn hide_window() -> bool {
+/// Ask Hammerspoon to park the launcher window. With `restore_focus` the window
+/// that was in front before seekr gets the focus back (Esc); without it, the
+/// app that was just opened keeps the focus `open` gave it (Enter), instead of
+/// being pushed behind the previous app a moment later. The `hs` CLI answers
+/// in a few milliseconds; AppleScript is the slower fallback. Returns false
+/// when neither route works (no Hammerspoon), in which case the caller should
+/// quit instead.
+pub fn hide_window(restore_focus: bool) -> bool {
+    // A launcher script that predates the argument ignores it and always
+    // restores focus: the old behaviour, not a failure.
+    let lua = if restore_focus {
+        "package.loaded.seekr.hide()"
+    } else {
+        "package.loaded.seekr.hide(false)"
+    };
     for hs in ["/opt/homebrew/bin/hs", "/usr/local/bin/hs", "hs"] {
-        if run(hs, &["-c", LUA_HIDE]) {
+        if run(hs, &["-c", lua]) {
             return true;
         }
     }
-    let script = format!("tell application \"Hammerspoon\" to execute lua code \"{LUA_HIDE}\"");
+    let script = format!("tell application \"Hammerspoon\" to execute lua code \"{lua}\"");
     run("osascript", &["-e", &script])
 }
 
