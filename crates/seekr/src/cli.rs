@@ -3,10 +3,12 @@ use crate::loader;
 use crate::util::{human_size, relative_time};
 use anyhow::{bail, Result};
 use seekr_core::actions::{self, Action};
+use seekr_core::define::{self, Sense};
 use seekr_core::providers::apps;
 use seekr_core::search::kinds_for_query;
-use seekr_core::{doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
+use seekr_core::{calc, doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Result<()> {
@@ -139,9 +141,10 @@ pub fn index(full: bool, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "apps: {}  (+{} from LaunchServices)\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
+            "apps: {}  (+{} from LaunchServices)\nplaces: {}\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
             report.apps,
             report.lsregister_apps,
+            report.places,
             report.files,
             report.folders,
             report.walk_errors,
@@ -299,4 +302,81 @@ pub fn search_in(keyword: &str, terms: &str, print: bool, json: bool) -> Result<
         }
     }
     Ok(())
+}
+
+/// `seekr calc 2+2*3`: print the answer (`8`; with thousands separators on a
+/// terminal, plain when piped), or with `--json` the whole [`calc::Calculation`].
+/// Not a calculation, division by zero and undefined results exit non-zero
+/// (with `--json`, after printing `{"input", "error", "message"}`).
+pub fn calc(expr: &str, json: bool) -> Result<()> {
+    match calc::evaluate(expr) {
+        Ok(c) if json => println!("{}", serde_json::to_string_pretty(&c)?),
+        Ok(c) if std::io::stdout().is_terminal() => println!("{}", c.display),
+        Ok(c) => println!("{}", c.raw),
+        Err(e) if json => {
+            let v = serde_json::json!({ "input": expr, "error": e, "message": e.to_string() });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            std::process::exit(1);
+        }
+        Err(e) => bail!("{e}: {expr:?}"),
+    }
+    Ok(())
+}
+
+/// `seekr define serendipity`: the system dictionary's entry, or exit 1.
+pub fn define(word: &str, json: bool) -> Result<()> {
+    let word = word.trim();
+    if !define::is_word(word) {
+        eprintln!("seekr: {word:?} is not a single word (letters, inner - or ' only)");
+        std::process::exit(1);
+    }
+    let Some(d) = define::define(word) else {
+        if define::available() {
+            eprintln!("seekr: no dictionary entry for {word:?}");
+        } else {
+            eprintln!(
+                "seekr: the macOS dictionary is not available (it downloads on first use; try again shortly)"
+            );
+        }
+        std::process::exit(1);
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&d)?);
+        return Ok(());
+    }
+    match &d.pronunciation {
+        Some(p) => println!("{}  /{p}/", d.headword),
+        None => println!("{}", d.headword),
+    }
+    if let Some(n) = &d.note {
+        println!("{n}");
+    }
+    for part in &d.parts {
+        println!();
+        match (&part.name, &part.note) {
+            (Some(name), Some(note)) => println!("{name}  {note}"),
+            (Some(name), None) => println!("{name}"),
+            (None, Some(note)) => println!("{note}"),
+            (None, None) => {}
+        }
+        let numbered = part.senses.len() > 1;
+        for (i, s) in part.senses.iter().enumerate() {
+            let lead = if numbered { format!("{:>2}. ", i + 1) } else { "    ".into() };
+            print_sense(&lead, s);
+            for sub in &s.subsenses {
+                print_sense("     • ", sub);
+            }
+        }
+    }
+    if let Some(o) = &d.origin {
+        println!("\norigin: {o}");
+    }
+    Ok(())
+}
+
+fn print_sense(lead: &str, s: &Sense) {
+    match s.examples.first() {
+        Some(e) => println!("{lead}{}: ‘{e}’", s.text),
+        None => println!("{lead}{}", s.text),
+    }
 }

@@ -12,14 +12,16 @@ use ratatui::crossterm::terminal::SetTitle;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use seekr_core::actions::{self, Action};
+use seekr_core::calc::{self, Calculation};
+use seekr_core::define::{self, Definition, Sense};
 use seekr_core::{AppSearch, Config, Hit, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RESULT_LIMIT: usize = 200;
@@ -45,6 +47,8 @@ struct App {
     idx: Index,
     searcher: Searcher,
     input: String,
+    /// Caret position in `input`, in chars.
+    cursor: usize,
     selected: usize,
     hits: Vec<Hit>,
     list_state: ListState,
@@ -73,6 +77,10 @@ struct App {
     last_refresh: Instant,
     /// Set while the query starts with an app-search keyword (`arc: …`).
     app_search: Option<AppSearchMode>,
+    /// The query is a calculation: its answer is pinned above the hits, as row 0.
+    calc: Option<Calculation>,
+    /// Dictionary entry for a one-word query, looked up in the background.
+    dict: DictLookup,
 }
 
 /// Skip the wake-up refresh if one ran this recently.
@@ -113,6 +121,7 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         idx,
         searcher,
         input: String::new(),
+        cursor: 0,
         selected: 0,
         hits: Vec::new(),
         list_state: ListState::default(),
@@ -132,6 +141,8 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         terminate: Arc::new(AtomicBool::new(false)),
         last_refresh: Instant::now(),
         app_search: None,
+        calc: None,
+        dict: DictLookup::spawn(),
     };
     app.set_input(initial);
     if resident {
@@ -201,6 +212,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         }
         was_running = st.running;
         app.announce_refreshes();
+        app.dict.poll();
         if let Some((_, t)) = &app.status {
             if t.elapsed() > Duration::from_secs(3) {
                 app.status = None;
@@ -250,11 +262,14 @@ impl App {
     }
 
     fn set_input(&mut self, s: String) {
+        self.cursor = s.chars().count();
         self.input = s;
         self.input_selected = false;
         self.selected = 0;
         self.dirty = true;
+        self.calc = calc::evaluate(&self.input).ok();
         let mut q = Query::parse_with(&self.input, &self.cfg.searches);
+        self.dict.want(define::word_for_query(&q));
         if let Some(target) = q.app_search.take() {
             // Nothing from the index is shown in this mode; the matcher keeps its last query.
             let app = self.app_search.take().and_then(|m| m.app);
@@ -292,11 +307,12 @@ impl App {
 
     fn refresh_results(&mut self) {
         self.hits = self.searcher.results(RESULT_LIMIT);
-        if self.hits.is_empty() {
+        let rows = self.row_count();
+        if rows == 0 {
             self.selected = 0;
             self.list_state.select(None);
         } else {
-            self.selected = self.selected.min(self.hits.len() - 1);
+            self.selected = self.selected.min(rows - 1);
             self.list_state.select(Some(self.selected));
         }
         self.dirty = false;
@@ -349,15 +365,32 @@ impl App {
         }
     }
 
+    /// Rows pinned above the hits: the answer, when the query is a calculation.
+    /// `selected` counts them, so hit `i` is row `i + pinned_rows()`.
+    fn pinned_rows(&self) -> usize {
+        usize::from(self.calc.is_some())
+    }
+
+    fn row_count(&self) -> usize {
+        self.pinned_rows() + self.hits.len()
+    }
+
     fn selected_hit(&self) -> Option<&Hit> {
-        self.hits.get(self.selected)
+        self.selected
+            .checked_sub(self.pinned_rows())
+            .and_then(|i| self.hits.get(i))
+    }
+
+    /// The calculation, when its answer row is the selected one.
+    fn selected_calc(&self) -> Option<&Calculation> {
+        self.calc.as_ref().filter(|_| self.selected == 0)
     }
 
     fn move_sel(&mut self, delta: isize) {
-        if self.hits.is_empty() {
+        if self.row_count() == 0 {
             return;
         }
-        let n = self.hits.len() as isize;
+        let n = self.row_count() as isize;
         let cur = self.selected as isize;
         self.selected = (cur + delta).rem_euclid(n) as usize;
         self.list_state.select(Some(self.selected));
@@ -387,19 +420,115 @@ impl App {
         Ok(())
     }
 
+    /// ⏎ or ^y on the answer row: copy the answer as a plain number. ⏎ in the
+    /// launcher also hides it and hands focus back (nothing was opened); a
+    /// finder in a terminal stays, with the answer still on screen.
+    fn copy_calc(&mut self, dismiss: bool) {
+        let Some(raw) = self.selected_calc().map(|c| c.raw.clone()) else {
+            return;
+        };
+        if let Err(e) = actions::copy_to_clipboard(&raw) {
+            self.flash(format!("Copy: {e}"));
+            return;
+        }
+        if dismiss && self.resident {
+            self.dismiss(true);
+        } else {
+            self.flash(format!("copied {raw} ✓"));
+        }
+    }
+
     fn clear_input(&mut self) {
         self.set_input(String::new());
     }
 
-    /// Delete the last word (`^w`, `⌥⌫`). A trailing scope prefix like `doc:` counts as a word.
+    /// Byte offset of char position `c` in the query.
+    fn byte_at(&self, c: usize) -> usize {
+        self.input.char_indices().nth(c).map_or(self.input.len(), |(i, _)| i)
+    }
+
+    /// Chars at the start of the query the caret can't enter: the `arc: `
+    /// keyword that the app-search chip stands for.
+    fn locked_prefix(&self) -> usize {
+        match &self.app_search {
+            Some(m) if self.input.ends_with(m.terms.as_str()) => {
+                self.input.chars().count() - m.terms.chars().count()
+            }
+            _ => 0,
+        }
+    }
+
+    fn move_cursor(&mut self, to: usize) {
+        self.cursor = to.clamp(self.locked_prefix(), self.input.chars().count());
+    }
+
+    /// Replace chars `from..to` with `text` and leave the caret after it.
+    fn splice(&mut self, from: usize, to: usize, text: &str) {
+        let (a, b) = (self.byte_at(from), self.byte_at(to));
+        let s = format!("{}{text}{}", &self.input[..a], &self.input[b..]);
+        self.set_input(s);
+        self.move_cursor(from + text.chars().count());
+    }
+
+    /// Where the word before the caret starts (`⌥←`, `^w`): skip spaces, then non-spaces.
+    fn word_start(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        i.max(self.locked_prefix())
+    }
+
+    /// Where the word after the caret ends (`⌥→`).
+    fn word_end(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Delete the word before the caret (`^w`, `⌥⌫`). A scope prefix like `doc:` counts as a word.
     fn delete_word(&mut self) {
-        let trimmed = self.input.trim_end();
-        let cut = trimmed
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let new = self.input[..cut].to_string();
-        self.set_input(new);
+        let start = self.word_start();
+        self.splice(start, self.cursor, "");
+    }
+
+    /// Caret keys, shared by the index and app-search modes. False: not one of them.
+    fn edit_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let alt = mods.contains(KeyModifiers::ALT);
+        // ⌘ arrows arrive as SUPER (contrib/kitty/seekr.conf maps them).
+        let cmd = mods.contains(KeyModifiers::SUPER);
+        let (lo, hi) = (self.locked_prefix(), self.input.chars().count());
+        match code {
+            KeyCode::Left if cmd => self.move_cursor(lo),
+            KeyCode::Right if cmd => self.move_cursor(hi),
+            KeyCode::Left if alt || ctrl => self.move_cursor(self.word_start()),
+            KeyCode::Right if alt || ctrl => self.move_cursor(self.word_end()),
+            KeyCode::Char('b') if alt => self.move_cursor(self.word_start()),
+            KeyCode::Char('f') if alt => self.move_cursor(self.word_end()),
+            KeyCode::Left => self.move_cursor(self.cursor.saturating_sub(1)),
+            KeyCode::Right => self.move_cursor(self.cursor + 1),
+            KeyCode::Char('a') if ctrl => self.move_cursor(lo),
+            KeyCode::Char('u') if ctrl => self.splice(lo, self.cursor, ""),
+            KeyCode::Char('w') if ctrl => self.delete_word(),
+            KeyCode::Backspace if alt => self.delete_word(),
+            KeyCode::Backspace if cmd => self.splice(lo, self.cursor, ""),
+            KeyCode::Backspace if self.cursor > lo => self.splice(self.cursor - 1, self.cursor, ""),
+            KeyCode::Delete if self.cursor < hi => self.splice(self.cursor, self.cursor + 1, ""),
+            KeyCode::Char(ch) if !ctrl && !alt => self.splice(self.cursor, self.cursor, &ch.to_string()),
+            _ => return false,
+        }
+        true
     }
 
     /// ⇥: hand the query to the selected app's search (or to the search whose
@@ -460,6 +589,8 @@ impl App {
             (KeyCode::Enter, _) => self.run_app_search(),
             // Nothing typed yet: ⌫ steps out of the search and leaves the keyword.
             (KeyCode::Backspace, _) if nothing_typed => self.set_input(keyword),
+            // At the start of the terms, ⌫ has nothing it may delete.
+            (KeyCode::Backspace, _) if self.cursor <= self.locked_prefix() => {}
             (KeyCode::Char('y'), true) => match actions::copy_to_clipboard(&url) {
                 Ok(()) => self.flash("Copy URL ✓"),
                 Err(e) => self.flash(format!("Copy URL: {e}")),
@@ -569,6 +700,11 @@ impl App {
                     self.clear_input();
                     return Ok(());
                 }
+                // Like a text field: ← collapses the selection to its start.
+                (KeyCode::Left, _) => {
+                    self.move_cursor(0);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -586,14 +722,17 @@ impl App {
                     self.flash("cleared · esc again to quit");
                 }
             }
+            (KeyCode::Enter, _) if self.selected_calc().is_some() => self.copy_calc(true),
             (KeyCode::Enter, _) => self.act(Action::Open, true)?,
             (KeyCode::Char('r'), true) | (KeyCode::Char('o'), true) => {
                 self.act(Action::Reveal, true)?
             }
             (KeyCode::Char('e'), true) => self.act(Action::OpenParent, true)?,
+            (KeyCode::Char('y'), true) if self.selected_calc().is_some() => self.copy_calc(false),
             (KeyCode::Char('y'), true) => self.act(Action::CopyPath, false)?,
             (KeyCode::Char('v'), true) => self.act(Action::QuickLook, false)?,
             (KeyCode::Char('x'), true) => self.refresh_index(true),
+            (KeyCode::Char('l'), true) => self.open_definition(),
             (KeyCode::Tab, _) => self.tab(),
             (KeyCode::Down, _) | (KeyCode::Char('n'), true) | (KeyCode::Char('j'), true) => {
                 self.move_sel(1)
@@ -608,25 +747,14 @@ impl App {
                 self.list_state.select(Some(0));
             }
             (KeyCode::End, _) => {
-                if !self.hits.is_empty() {
-                    self.selected = self.hits.len() - 1;
+                if self.row_count() > 0 {
+                    self.selected = self.row_count() - 1;
                     self.list_state.select(Some(self.selected));
                 }
             }
-            (KeyCode::Char('u'), true) => self.clear_input(),
-            (KeyCode::Char('w'), true) => self.delete_word(),
-            (KeyCode::Backspace, _) if mods.contains(KeyModifiers::ALT) => self.delete_word(),
-            (KeyCode::Backspace, _) => {
-                let mut s = self.input.clone();
-                s.pop();
-                self.set_input(s);
+            _ => {
+                self.edit_key(code, mods);
             }
-            (KeyCode::Char(ch), false) => {
-                let mut s = self.input.clone();
-                s.push(ch);
-                self.set_input(s);
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -672,14 +800,31 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Compact launcher windows: give the whole width to results.
     if area.width < COMPACT_WIDTH {
-        draw_results(f, rows[1], app);
+        if definition_replaces_results(app) {
+            draw_definition_without_hits(f, rows[1], app);
+        } else {
+            let (list, card) = split_for_definition(rows[1], app, 45, 5);
+            draw_results(f, list, app);
+            if let Some(card) = card {
+                draw_definition(f, card, app);
+            }
+        }
     } else {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(rows[1]);
-        draw_results(f, cols[0], app);
-        draw_preview(f, cols[1], app);
+        if definition_replaces_results(app) {
+            draw_definition_without_hits(f, cols[0], app);
+            draw_preview(f, cols[1], app);
+        } else {
+            draw_results(f, cols[0], app);
+            let (details, card) = split_for_definition(cols[1], app, 55, 12);
+            draw_preview(f, details, app);
+            if let Some(card) = card {
+                draw_definition(f, card, app);
+            }
+        }
     }
     draw_status(f, rows[2], app);
 }
@@ -737,7 +882,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             });
             if app.input.is_empty() {
                 spans.push(Span::styled(
-                    "type to search · app: doc: dir: in: ext: · ⇥ cycles scope",
+                    "type to search · app: doc: dir: in: ext: · ⇥ cycles scope · 2+2 calculates",
                     dim,
                 ));
             }
@@ -745,6 +890,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     let text_end = area.x + width as u16;
+    // The caret: after the typed text, or inside it once moved with the arrows.
+    let behind = app.input.chars().count().saturating_sub(app.cursor) as u16;
+    let caret = if app.input_selected { text_end } else { text_end.saturating_sub(behind) };
     let tip: Option<String> = if app.input.is_empty() {
         None
     } else if app.input_selected {
@@ -757,6 +905,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         } else {
             "type something · ⌫ back · esc clear ".into()
         })
+    } else if app.selected_calc().is_some() {
+        Some("⏎ copy answer · esc clear ".into())
     } else if let Some((s, _)) = app.search_for_selection() {
         Some(format!("⇥ search in {} · esc clear ", s.name()))
     } else {
@@ -769,7 +919,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(Paragraph::new(Span::styled(tip, dim)), tip_area);
         }
     }
-    f.set_cursor_position(Position::new(text_end.min(area.right().saturating_sub(1)), area.y));
+    f.set_cursor_position(Position::new(caret.min(area.right().saturating_sub(1)), area.y));
 }
 
 fn results_block(app: &App) -> Block<'static> {
@@ -792,7 +942,7 @@ fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
         draw_home(f, area, app);
         return;
     }
-    if app.hits.is_empty() && !app.loading() {
+    if app.hits.is_empty() && app.calc.is_none() && !app.loading() {
         draw_empty(f, area, app);
         return;
     }
@@ -805,7 +955,8 @@ fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
 /// The result rows, with the selection highlighted, filling `area`.
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = app.hits.iter().map(|h| result_item(h, width)).collect();
+    let mut items: Vec<ListItem> = app.calc.iter().map(|c| calc_item(c, width)).collect();
+    items.extend(app.hits.iter().map(|h| result_item(h, width)));
     let list = List::new(items)
         .highlight_style(
             Style::default()
@@ -814,6 +965,23 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
         )
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+/// The pinned answer row: `= 8,435.5714285714  (1 + 2)^10 / 7`.
+fn calc_item(c: &Calculation, width: usize) -> ListItem<'static> {
+    let answer = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled("= ", answer),
+        Span::styled(c.display.clone(), answer),
+    ];
+    let room = width.saturating_sub(c.display.chars().count() + 2);
+    if room > 8 {
+        spans.push(Span::styled(
+            format!("  {}", ellipsize(&c.expr, room - 2)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn result_item(h: &Hit, width: usize) -> ListItem<'static> {
@@ -921,7 +1089,8 @@ fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
     let key = Style::default().fg(Color::Cyan);
     let mut hints = vec![
         Line::from(vec![
-            Span::styled("type to find apps, documents, folders and media", dim),
+            Span::styled("type to find apps, documents, folders and media, or ", dim),
+            Span::styled("2+2", key),
         ]),
         Line::from(vec![
             Span::styled("app:", key),
@@ -1072,6 +1241,8 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("esc ", key),
             Span::raw("clear"),
         ]));
+    } else if let Some(c) = app.selected_calc() {
+        lines = calc_details(c, area.width.saturating_sub(2) as usize, app.resident);
     } else if let Some(h) = app.selected_hit() {
         let it = &h.item;
         lines.push(Line::from(vec![Span::styled(
@@ -1164,6 +1335,70 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Details for the answer row: the expression, the answer in large digits
+/// when they fit, and what ⏎ does.
+fn calc_details(c: &Calculation, width: usize, resident: bool) -> Vec<Line<'static>> {
+    let label = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Cyan);
+    let answer = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::from(Span::styled("Calculator", answer)),
+        Line::from(Span::styled(c.expr.clone(), label)),
+        Line::from(""),
+    ];
+    match big_digits(&c.display).filter(|rows| rows[0].chars().count() + 1 <= width) {
+        Some(rows) => {
+            for row in rows {
+                lines.push(Line::from(Span::styled(format!(" {row}"), answer)));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(format!("= {}", c.display), answer))),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled("value  ", label), Span::raw(c.raw.clone())]));
+    lines.push(Line::from(""));
+    // In the launcher ⏎ also hides the window; ^y copies and stays.
+    let mut keys = vec![Span::styled("⏎ ", key), Span::raw("copy  ")];
+    if resident {
+        keys[1] = Span::raw("copy and hide  ");
+        keys.extend([Span::styled("^y ", key), Span::raw("copy  ")]);
+    }
+    keys.extend([Span::styled("↓ ", key), Span::raw("results")]);
+    lines.push(Line::from(keys));
+    lines
+}
+
+/// `display` in three-row digits, or None if it has characters without one
+/// (scientific notation). Commas hang below the line, like a comma.
+fn big_digits(display: &str) -> Option<[String; 3]> {
+    let mut rows: [String; 3] = Default::default();
+    for (i, ch) in display.chars().enumerate() {
+        let glyph: [&str; 3] = match ch {
+            '0' => ["┏━┓", "┃ ┃", "┗━┛"],
+            '1' => ["╺┓ ", " ┃ ", "╺┻╸"],
+            '2' => ["╺━┓", "┏━┛", "┗━╸"],
+            '3' => ["╺━┓", " ━┫", "╺━┛"],
+            '4' => ["╻ ╻", "┗━┫", "  ╹"],
+            '5' => ["┏━╸", "┗━┓", "╺━┛"],
+            '6' => ["┏━╸", "┣━┓", "┗━┛"],
+            '7' => ["╺━┓", "  ┃", "  ╹"],
+            '8' => ["┏━┓", "┣━┫", "┗━┛"],
+            '9' => ["┏━┓", "┗━┫", "╺━┛"],
+            '-' => ["   ", "╺━╸", "   "],
+            '.' => [" ", " ", "▪"],
+            ',' => [" ", " ", "╻"],
+            _ => return None,
+        };
+        for (row, part) in rows.iter_mut().zip(glyph) {
+            if i > 0 {
+                row.push(' ');
+            }
+            row.push_str(part);
+        }
+    }
+    Some(rows)
+}
+
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = Vec::new();
     if let Some(err) = app.loader_error() {
@@ -1192,9 +1427,357 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let esc = if app.resident { "esc clear/hide · ^c quit" } else { "esc clear/quit" };
     let keys = if app.app_search.is_some() {
         format!("  ⏎ search · ^y copy url · ⌫ back · {esc}")
+    } else if app.selected_calc().is_some() {
+        format!("  ⏎ copy answer · ^y copy · ↑↓ results · {esc}")
     } else {
-        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh · {esc}")
+        let dict = if app.definition().is_some() { " · ^l dictionary" } else { "" };
+        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh{dict} · {esc}")
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary card: the definition of a one-word query, like Spotlight's.
+
+/// Wait this long for the next keystroke before looking a word up.
+const DEFINE_DEBOUNCE: Duration = Duration::from_millis(100);
+/// Nerd Font book, for the definition card's title.
+const DICT_GLYPH: &str = "\u{f02d}";
+
+/// Dictionary lookups for the query, on a worker thread so typing never waits
+/// (a lookup takes a few ms, the first one in a process 100–250 ms).
+struct DictLookup {
+    tx: mpsc::Sender<String>,
+    rx: mpsc::Receiver<(String, Option<Definition>)>,
+    /// The word the query asks to define.
+    word: Option<String>,
+    /// Its entry, once the lookup has landed.
+    entry: Option<Definition>,
+}
+
+impl DictLookup {
+    fn spawn() -> DictLookup {
+        let (tx, requests) = mpsc::channel::<String>();
+        let (results, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Load the dictionary before the first word arrives.
+            define::warm_up();
+            while let Ok(mut word) = requests.recv() {
+                // Latest query wins: wait out the typing and look up only the newest word.
+                loop {
+                    match requests.recv_timeout(DEFINE_DEBOUNCE) {
+                        Ok(w) => word = w,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                let entry = define::define(&word);
+                if results.send((word, entry)).is_err() {
+                    return;
+                }
+            }
+        });
+        DictLookup {
+            tx,
+            rx,
+            word: None,
+            entry: None,
+        }
+    }
+
+    /// The query now asks for `word` (or for nothing): answer from the cache,
+    /// else ask the worker.
+    fn want(&mut self, word: Option<&str>) {
+        if self.word.as_deref() == word {
+            return;
+        }
+        self.word = word.map(str::to_string);
+        self.entry = None;
+        if let Some(w) = word {
+            match define::cached(w) {
+                Some(hit) => self.entry = hit,
+                None => {
+                    let _ = self.tx.send(w.to_string());
+                }
+            }
+        }
+    }
+
+    /// Take finished lookups; answers for words no longer asked for are dropped.
+    fn poll(&mut self) {
+        while let Ok((word, entry)) = self.rx.try_recv() {
+            if self.word.as_deref() == Some(word.as_str()) {
+                self.entry = entry;
+            }
+        }
+    }
+}
+
+impl App {
+    /// The dictionary entry to show for the query, if any.
+    fn definition(&self) -> Option<&Definition> {
+        if self.app_search.is_some() || self.input.trim().is_empty() {
+            return None;
+        }
+        self.dict.entry.as_ref()
+    }
+
+    /// `^l`: show the word in Dictionary.app.
+    fn open_definition(&mut self) {
+        let Some(word) = self.definition().map(|d| d.headword.clone()) else {
+            self.flash("no dictionary entry for the query");
+            return;
+        };
+        match define::open_in_dictionary(&word) {
+            // Dictionary has the focus now, like after ⏎.
+            Ok(()) => self.dismiss(false),
+            Err(e) => self.flash(format!("Dictionary: {e}")),
+        }
+    }
+}
+
+/// No index hits for a word: the card takes the place of "no matches".
+fn definition_replaces_results(app: &App) -> bool {
+    app.definition().is_some() && app.hits.is_empty() && app.calc.is_none() && !app.loading()
+}
+
+/// Rows the card needs to show all of `d` in a card `width` columns wide.
+fn definition_height(d: &Definition, width: u16) -> u16 {
+    let width = width.saturating_sub(4) as usize;
+    let lines = definition_lines(d, width, 3).len() + origin_lines(d, width).len() + 1;
+    lines.min(u16::MAX as usize - 2) as u16 + 2
+}
+
+/// No index hits: the card where the results were, as tall as it needs, and
+/// the "no matches" note below it when there is room.
+fn draw_definition_without_hits(f: &mut Frame, area: Rect, app: &App) {
+    let need = app.definition().map(|d| definition_height(d, area.width)).unwrap_or(0);
+    if area.height < need + 8 {
+        draw_definition(f, area, app);
+        return;
+    }
+    draw_definition(f, Rect::new(area.x, area.y, area.width, need), app);
+    draw_empty(f, Rect::new(area.x, area.y + need, area.width, area.height - need), app);
+}
+
+/// Split `area` into what was there and, below it, the definition card: as
+/// tall as the entry needs, at most `pct`% of `area`, leaving `keep` rows.
+fn split_for_definition(area: Rect, app: &App, pct: u16, keep: u16) -> (Rect, Option<Rect>) {
+    let Some(d) = app.definition() else {
+        return (area, None);
+    };
+    let cap = (area.height * pct / 100).min(area.height.saturating_sub(keep));
+    let h = definition_height(d, area.width).min(cap);
+    if h < 5 {
+        return (area, None);
+    }
+    let top = Rect::new(area.x, area.y, area.width, area.height - h);
+    let card = Rect::new(area.x, area.y + area.height - h, area.width, h);
+    (top, Some(card))
+}
+
+fn draw_definition(f: &mut Frame, area: Rect, app: &App) {
+    let Some(d) = app.definition() else {
+        return;
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {DICT_GLYPH} definition "))
+        .title_bottom(
+            Line::from(vec![
+                Span::styled(" ^l", Style::default().fg(Color::Cyan)),
+                Span::styled(" open in Dictionary ", dim),
+            ])
+            .right_aligned(),
+        )
+        .border_style(dim)
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines = fit_definition(d, inner.width as usize, inner.height as usize);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The most detailed rendering of `d` that fits `height` rows, with the origin
+/// when there is room; cut with an ellipsis when even the plainest does not fit.
+fn fit_definition(d: &Definition, width: usize, height: usize) -> Vec<Line<'static>> {
+    if width < 8 || height == 0 {
+        return Vec::new();
+    }
+    for level in (0..=3).rev() {
+        let mut lines = definition_lines(d, width, level);
+        if lines.len() <= height {
+            let origin = origin_lines(d, width);
+            if !origin.is_empty() && lines.len() + 1 + origin.len() <= height {
+                lines.push(Line::from(""));
+                lines.extend(origin);
+            }
+            return lines;
+        }
+    }
+    let mut lines = definition_lines(d, width, 1);
+    lines.truncate(height);
+    if let Some(last) = lines.pop() {
+        lines.push(ellipsize_line(last, width));
+    }
+    lines
+}
+
+/// `d` as card lines, `width` columns wide. Detail `level`: 3 = senses,
+/// subsenses and an example each; 2 = subsenses without examples; 1 = senses
+/// with an example; 0 = senses only.
+fn definition_lines(d: &Definition, width: usize, level: u8) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut out = Vec::new();
+    let mut head = vec![(d.headword.clone(), Style::default().add_modifier(Modifier::BOLD))];
+    if let Some(p) = &d.pronunciation {
+        head.push((format!("  /{p}/"), dim));
+    }
+    if let Some(n) = &d.note {
+        head.push((format!("  {n}"), dim));
+    }
+    out.extend(wrap_styled(Vec::new(), &head, width, 2));
+    for part in &d.parts {
+        if level >= 2 {
+            out.push(Line::from(""));
+        }
+        let mut pos = Vec::new();
+        if let Some(name) = &part.name {
+            pos.push((
+                name.clone(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC),
+            ));
+        }
+        if let Some(n) = &part.note {
+            let sep = if pos.is_empty() { "" } else { "  " };
+            pos.push((format!("{sep}{n}"), dim));
+        }
+        if !pos.is_empty() {
+            out.extend(wrap_styled(Vec::new(), &pos, width, 2));
+        }
+        let numbered = part.senses.len() > 1;
+        for (i, s) in part.senses.iter().enumerate() {
+            let (prefix, indent) = if numbered {
+                let n = format!("{} ", i + 1);
+                let w = n.len();
+                (vec![Span::styled(n, Style::default().fg(Color::Cyan))], w)
+            } else {
+                (Vec::new(), 0)
+            };
+            out.extend(wrap_styled(prefix, &sense_segments(s, level >= 1), width, indent));
+            if level >= 2 {
+                for sub in &s.subsenses {
+                    let prefix = vec![Span::raw(" ".repeat(indent)), Span::styled("• ", dim)];
+                    out.extend(wrap_styled(prefix, &sense_segments(sub, level >= 3), width, indent + 2));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn origin_lines(d: &Definition, width: usize) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    match &d.origin {
+        Some(o) => wrap_styled(
+            vec![Span::styled("origin ", dim.add_modifier(Modifier::BOLD))],
+            &[(o.clone(), dim)],
+            width,
+            0,
+        ),
+        None => Vec::new(),
+    }
+}
+
+/// A sense's text, then (optionally) its first example, dimmed.
+fn sense_segments(s: &Sense, example: bool) -> Vec<(String, Style)> {
+    let mut segs = vec![(s.text.clone(), Style::default())];
+    if example {
+        if let Some(e) = s.examples.first() {
+            // `[with object] : she ran the bath`: the grammar label is noise here.
+            let e = match e.find("] : ") {
+                Some(i) if e.starts_with('[') => &e[i + 4..],
+                _ => e.as_str(),
+            };
+            let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+            segs.push((": ".into(), Style::default()));
+            segs.push((e.to_string(), style));
+        }
+    }
+    segs
+}
+
+/// Word-wrap styled text into lines of at most `width` columns. The first line
+/// starts with `prefix`; the others are indented by `indent` columns.
+fn wrap_styled(
+    prefix: Vec<Span<'static>>,
+    segments: &[(String, Style)],
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
+    let indent = indent.min(width / 2);
+    let mut lines = Vec::new();
+    let mut used: usize = prefix.iter().map(|s| s.width()).sum();
+    let mut line_start = used;
+    let mut cur = prefix;
+    for (text, style) in segments {
+        for atom in text.split_inclusive(' ') {
+            let mut atom = atom.to_string();
+            loop {
+                let w = Span::raw(atom.trim_end()).width();
+                if used + w <= width {
+                    used += Span::raw(atom.as_str()).width();
+                    cur.push(Span::styled(atom, *style));
+                    break;
+                }
+                if used > line_start {
+                    // Start a new line, then retry the word there.
+                    lines.push(Line::from(std::mem::take(&mut cur)));
+                    cur.push(Span::raw(" ".repeat(indent)));
+                    used = indent;
+                    line_start = indent;
+                    atom = atom.trim_start().to_string();
+                    continue;
+                }
+                // Longer than a whole line: hard-split it.
+                let room = width.saturating_sub(used).max(1);
+                let head: String = atom.chars().take(room).collect();
+                let rest: String = atom.chars().skip(room).collect();
+                cur.push(Span::styled(head, *style));
+                used = width;
+                if rest.is_empty() {
+                    break;
+                }
+                atom = rest;
+            }
+        }
+    }
+    if cur.iter().any(|s| !s.content.trim().is_empty()) {
+        lines.push(Line::from(cur));
+    }
+    lines
+}
+
+/// Cut `line` to `width` columns and end it with an ellipsis.
+fn ellipsize_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = line.spans;
+    let total = |spans: &Vec<Span<'static>>| spans.iter().map(|s| s.width()).sum::<usize>();
+    while total(&spans) + 2 > width {
+        let Some(last) = spans.pop() else {
+            break;
+        };
+        let mut text = last.content.into_owned();
+        text.pop();
+        if !text.is_empty() {
+            spans.push(Span::styled(text, last.style));
+        }
+    }
+    if let Some(last) = spans.pop() {
+        let text = last.content.trim_end().to_string();
+        spans.push(Span::styled(text, last.style));
+    }
+    spans.push(Span::styled(" …", Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
 }

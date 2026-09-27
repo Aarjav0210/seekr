@@ -85,6 +85,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Define a word with the macOS dictionary (offline). Exits non-zero when there is no entry.
+    Define {
+        word: String,
+        /// Emit JSON: headword, pronunciation, parts of speech with senses, origin, raw text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Search inside an app: `seekr search-in spotify daft punk`. Without terms, opens the app.
     SearchIn {
         /// Keyword of the search; `seekr searches` lists them.
@@ -95,6 +102,15 @@ enum Cmd {
         #[arg(long)]
         print: bool,
         /// Emit JSON: keyword, name, app, terms, url and the `open` command.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Evaluate a calculation: `seekr calc '(1+2)^10/7'`. Exits non-zero when it isn't one.
+    Calc {
+        /// The expression; several words are joined with spaces. Quote it in the shell.
+        #[arg(required = true, allow_hyphen_values = true)]
+        expr: Vec<String>,
+        /// Emit JSON: input, expr, value, raw and display (or input and error).
         #[arg(long)]
         json: bool,
     },
@@ -118,11 +134,19 @@ fn main() -> Result<()> {
         Some(Cmd::Doctor { json }) => cli::doctor(json),
         Some(Cmd::Kinds { json }) => cli::kinds(json),
         Some(Cmd::Searches { json }) => cli::searches(json),
+        Some(Cmd::Define { word, json }) => cli::define(&word, json),
         Some(Cmd::SearchIn {
             keyword,
             terms,
             print,
             json,
         }) => cli::search_in(&keyword, &terms.join(" "), print, json),
+        Some(Cmd::Calc { mut expr, json }) => {
+            // `-5+3` has to reach the expression, so hyphen values are allowed,
+            // which makes a trailing `--json` look like part of it.
+            let json = json || expr.iter().any(|w| w == "--json");
+            expr.retain(|w| w != "--json");
+            cli::calc(&expr.join(" "), json)
+        }
     }
 }
