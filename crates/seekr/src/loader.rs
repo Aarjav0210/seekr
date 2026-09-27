@@ -10,15 +10,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// A background loader's state, shared with the UI.
 #[derive(Default)]
 pub struct Progress {
-    /// Items this loader has pushed into the matcher.
-    pub loaded: AtomicUsize,
     /// New (previously unindexed) items found by the refresh walk so far.
-    pub added: AtomicUsize,
-    pub refreshing: AtomicBool,
-    pub done: AtomicBool,
-    announced: AtomicBool,
+    added: AtomicUsize,
+    refreshing: AtomicBool,
+    done: AtomicBool,
+    /// The outcome has been handed out by `take_report`.
+    reported: AtomicBool,
     report: Mutex<Option<RefreshReport>>,
     error: Mutex<Option<String>>,
 }
@@ -32,16 +32,26 @@ impl Progress {
         self.refreshing.load(Ordering::Acquire)
     }
 
+    pub fn added(&self) -> usize {
+        self.added.load(Ordering::Relaxed)
+    }
+
     pub fn error(&self) -> Option<String> {
         self.error.lock().ok().and_then(|e| e.clone())
     }
 
-    /// The refresh report, returned exactly once after completion (for a one-time UI notice).
-    pub fn take_report_once(&self) -> Option<RefreshReport> {
-        if self.is_done() && !self.announced.swap(true, Ordering::AcqRel) {
+    /// Once the loader is done: its refresh report, if it refreshed. Hands
+    /// the outcome out once (for a one-time notice); `None` after that.
+    pub fn take_report(&self) -> Option<RefreshReport> {
+        if self.is_done() && !self.reported.swap(true, Ordering::AcqRel) {
             return self.report.lock().ok().and_then(|r| r.clone());
         }
         None
+    }
+
+    /// Done, its outcome handed out, and no error to keep showing.
+    pub fn is_spent(&self) -> bool {
+        self.reported.load(Ordering::Acquire) && self.error().is_none()
     }
 }
 
@@ -78,22 +88,12 @@ fn load(
 ) -> Result<()> {
     let mut idx = Index::open_default()?;
     let push = |item: Item| {
-        let fresh = seen.lock().unwrap().insert(item.path.clone());
-        if fresh {
+        if seen.lock().unwrap().insert(item.path.clone()) {
             Searcher::inject(inj, item);
-            p.loaded.fetch_add(1, Ordering::Relaxed);
         }
     };
-
     let apps = apps::scan_app_dirs(cfg);
-    if opts.kinds.contains(&Kind::App) {
-        for a in &apps {
-            push(a.clone());
-        }
-    }
-    for it in idx.load_items(Some(&opts.kinds))? {
-        push(it);
-    }
+    feed(&idx, &apps, &opts.kinds, &push)?;
 
     if opts.refresh {
         p.refreshing.store(true, Ordering::Release);
@@ -107,6 +107,16 @@ fn load(
         *p.report.lock().unwrap() = Some(report);
         p.refreshing.store(false, Ordering::Release);
     }
+    Ok(())
+}
+
+/// Hand `push` the live app scan (when `kinds` wants apps), then the cached
+/// rows of `kinds`: apps first, so they are searchable while the rest loads.
+fn feed(idx: &Index, apps: &[Item], kinds: &[Kind], mut push: impl FnMut(Item)) -> Result<()> {
+    if kinds.contains(&Kind::App) {
+        apps.iter().cloned().for_each(&mut push);
+    }
+    idx.load_items(Some(kinds))?.into_iter().for_each(push);
     Ok(())
 }
 
@@ -135,17 +145,10 @@ pub fn load_blocking(
         report = Some(indexer::refresh(cfg, &mut idx, &apps, |_| {})?);
     }
     let mut seen = HashSet::new();
-    if kinds.contains(&Kind::App) {
-        for a in apps {
-            if seen.insert(a.path.clone()) {
-                searcher.push(a);
-            }
-        }
-    }
-    for it in idx.load_items(Some(kinds))? {
+    feed(&idx, &apps, kinds, |it| {
         if seen.insert(it.path.clone()) {
             searcher.push(it);
         }
-    }
+    })?;
     Ok(report)
 }

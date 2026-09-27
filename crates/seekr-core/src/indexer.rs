@@ -46,8 +46,7 @@ pub fn reindex(
 
     if full {
         let ls = apps::scan_launch_services()?;
-        let known: std::collections::HashSet<_> =
-            app_items.iter().map(|i| i.path.clone()).collect();
+        let known: HashSet<_> = app_items.iter().map(|i| i.path.clone()).collect();
         let extra: Vec<Item> = ls
             .into_iter()
             .filter(|i| !known.contains(&i.path))

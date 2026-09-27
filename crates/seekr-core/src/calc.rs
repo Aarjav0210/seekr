@@ -43,7 +43,8 @@ pub struct Calculation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CalcError {
-    /// Not an expression at all (or one that looks like a date, phone number, …).
+    /// Not an expression: no operator (`2024`, `pi`), or something that is not
+    /// arithmetic (`1.2.3`, `IMG_1234`, a word).
     NotAnExpression,
     /// `1/0`, `5 % 0`.
     DivisionByZero,

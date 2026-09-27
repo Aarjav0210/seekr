@@ -285,7 +285,7 @@ pub fn parse(word: &str, raw: &str) -> Option<Definition> {
             .skip(1)
             .map(str::trim)
             .filter(|l| !l.is_empty())
-            .map(|l| plain_sense(l))
+            .map(plain_sense)
             .collect();
         def.parts.push(PartOfSpeech {
             name: None,
@@ -592,7 +592,7 @@ fn parse_piece(s: &str) -> Sense {
     };
     let examples = split_top(examples, '|')
         .into_iter()
-        .map(|e| trim_example(e))
+        .map(trim_example)
         .filter(|e| !e.is_empty())
         .collect();
     Sense {

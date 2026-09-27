@@ -48,3 +48,35 @@ pub fn ellipsize(s: &str, max: usize) -> String {
     let t: String = s.chars().skip(n - tail).collect();
     format!("{h}…{t}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_times() {
+        let now = 1_000_000_000;
+        assert_eq!(relative_time(0, now), "—");
+        assert_eq!(relative_time(now - 30, now), "just now");
+        assert_eq!(relative_time(now - 60, now), "1 minute ago");
+        assert_eq!(relative_time(now - 7200, now), "2 hours ago");
+        assert_eq!(relative_time(now - 3 * 86_400, now), "3 days ago");
+        assert_eq!(relative_time(now - 400 * 86_400, now), "1 year ago");
+        assert_eq!(relative_time(now + 100, now), "just now", "clock skew");
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1536), "1.5 KB");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn ellipsizes_in_the_middle() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("~/Downloads/offer-letter.pdf", 12), "~/Dow…er.pdf");
+        assert_eq!(ellipsize("~/Downloads/offer-letter.pdf", 12).chars().count(), 12);
+        assert_eq!(ellipsize("abcdefgh", 4), "abcdefgh", "too narrow to cut");
+    }
+}

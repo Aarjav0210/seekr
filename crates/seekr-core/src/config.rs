@@ -1,5 +1,5 @@
 use crate::app_search::{self, AppSearch};
-use crate::item::expand_tilde;
+use crate::item::{expand_tilde, Kind};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -261,8 +261,13 @@ impl Config {
             .collect()
     }
 
-    pub fn is_lazy(&self, kind: crate::Kind) -> bool {
+    pub fn is_lazy(&self, kind: Kind) -> bool {
         self.lazy_kinds.iter().any(|k| k == kind.as_str())
+    }
+
+    /// Kinds loaded into the matcher up front: all but the lazy ones.
+    pub fn eager_kinds(&self) -> Vec<Kind> {
+        Kind::ALL.into_iter().filter(|&k| !self.is_lazy(k)).collect()
     }
 
     /// The app search whose keyword is `word` (`arc`), case-insensitively.

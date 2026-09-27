@@ -4,15 +4,17 @@
 //! 0. `name [alt]` — what the user's terms are matched against.
 //! 1. `kind`       — exact-matched when a scope (`app:`) is active.
 //! 2. `path`       — substring-matched for `in:` filters.
+use crate::config::Config;
 use crate::index::Usage;
 use crate::item::{Item, Kind};
 use crate::query::Query;
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config as NucleoConfig, Injector, Matcher, Nucleo, Status, Utf32String};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
@@ -124,6 +126,19 @@ impl Searcher {
         self.nucleo.tick(timeout_ms)
     }
 
+    /// Tick until the matcher has caught up with the query and every item
+    /// pushed so far, for callers without an event loop (the one-shot CLI,
+    /// tests). Gives up after `max`; returns whether it caught up.
+    pub fn settle(&mut self, max: Duration) -> bool {
+        let deadline = Instant::now() + max;
+        while self.tick(10).running {
+            if Instant::now() >= deadline {
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn total_items(&self) -> u32 {
         self.nucleo.snapshot().item_count()
     }
@@ -132,79 +147,67 @@ impl Searcher {
         self.nucleo.snapshot().matched_item_count()
     }
 
-    /// Ranked results. Takes nucleo's top candidates and re-scores them with
-    /// kind boosts, depth penalty and frecency.
+    /// Ranked results: recent items for a query without terms, else nucleo's
+    /// top candidates re-scored with kind boosts, depth penalty and frecency.
     pub fn results(&mut self, limit: usize) -> Vec<Hit> {
+        if self.query.terms.is_empty() {
+            self.browse(limit)
+        } else {
+            self.ranked(limit)
+        }
+    }
+
+    /// No terms: recently used items first (filtered like the query), then
+    /// whatever nucleo matched (apps are injected first, so they come next),
+    /// best kind first, then by name.
+    fn browse(&self, limit: usize) -> Vec<Hit> {
         let now = crate::now_secs();
-        let has_terms = !self.query.terms.is_empty();
+        let mut seen = HashSet::new();
+        let mut out: Vec<Hit> = self
+            .recent
+            .iter()
+            .filter(|r| self.query.matches_filters(r) && seen.insert(r.path.clone()))
+            .take(limit)
+            .map(|r| Hit {
+                item: r.clone(),
+                score: frecency(self.usage.get(&r.path), now),
+                indices: vec![],
+            })
+            .collect();
+        let snap = self.nucleo.snapshot();
+        let k = (limit * 3).min(snap.matched_item_count() as usize) as u32;
+        let mut rest: Vec<Hit> = snap
+            .matched_items(0..k)
+            .filter(|it| !seen.contains(&it.data.path))
+            .map(|it| Hit {
+                item: it.data.clone(),
+                score: it.data.kind.base_boost(),
+                indices: vec![],
+            })
+            .collect();
+        rest.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()))
+        });
+        out.extend(rest);
+        out.truncate(limit);
+        out
+    }
+
+    fn ranked(&mut self, limit: usize) -> Vec<Hit> {
+        let now = crate::now_secs();
         let Searcher {
             nucleo,
             matcher,
             usage,
-            recent,
             query,
             ..
         } = self;
         let snap = nucleo.snapshot();
-        let n = snap.matched_item_count();
-
-        if !has_terms {
-            // Empty terms: recents first (filtered by scope/in/ext), then whatever
-            // nucleo matched (apps are injected first, so they come next) by name.
-            let mut out: Vec<Hit> = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for r in recent.iter() {
-                if query.scope.is_some_and(|k| k != r.kind) {
-                    continue;
-                }
-                if let Some(d) = &query.in_dir {
-                    if !r.path_display().to_lowercase().contains(&d.to_lowercase()) {
-                        continue;
-                    }
-                }
-                if let Some(e) = &query.ext {
-                    if !r.name.to_lowercase().ends_with(&format!(".{e}")) {
-                        continue;
-                    }
-                }
-                if seen.insert(r.path.clone()) {
-                    let u = usage.get(&r.path).copied().unwrap_or_default();
-                    out.push(Hit {
-                        item: r.clone(),
-                        score: frecency(Some(&u), now),
-                        indices: vec![],
-                    });
-                }
-                if out.len() >= limit {
-                    break;
-                }
-            }
-            let k = (limit * 3).min(n as usize) as u32;
-            let mut rest: Vec<Hit> = snap
-                .matched_items(0..k)
-                .filter(|it| !seen.contains(&it.data.path))
-                .map(|it| Hit {
-                    item: it.data.clone(),
-                    score: it.data.kind.base_boost(),
-                    indices: vec![],
-                })
-                .collect();
-            rest.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.item.name.to_lowercase().cmp(&b.item.name.to_lowercase()))
-            });
-            out.extend(rest);
-            out.truncate(limit);
-            return out;
-        }
-
-        let k = (limit * 5).clamp(200, 1000).min(n as usize) as u32;
+        let k = (limit * 5).clamp(200, 1000).min(snap.matched_item_count() as usize) as u32;
         let pattern = snap.pattern().column_pattern(0);
-        let scoped = query.scope.is_some();
         let terms = query.terms.trim().to_lowercase();
-        let names_place = terms.chars().count() >= PLACE_MIN_PREFIX;
         let mut indices = Vec::new();
         let mut hits: Vec<Hit> = snap
             .matched_items(0..k)
@@ -214,44 +217,49 @@ impl Searcher {
                 let base = pattern
                     .indices(hay, matcher, &mut indices)
                     .unwrap_or(0) as f32;
+                // Highlight the name only; the alt name follows it in the haystack.
                 let name_len = it.data.name.chars().count() as u32;
                 indices.sort_unstable();
                 indices.dedup();
-                let idx: Vec<u32> = indices.iter().copied().filter(|&i| i < name_len).collect();
-                let mut kind_mult = if scoped { 1.0 } else { it.data.kind.base_boost() };
-                let names_this_place = names_place
-                    && it.data.is_place()
-                    && name_matches(&it.data, |n| n.starts_with(&terms));
-                if names_this_place {
-                    kind_mult *= PLACE_BOOST;
-                } else if it.data.kind == Kind::App && name_matches(&it.data, |n| n == terms) {
-                    kind_mult *= EXACT_APP_BOOST;
-                }
-                let depth_pen = 1.0 - 0.015 * (it.data.depth().saturating_sub(3).min(10) as f32);
-                // Source trees are noise unless you asked for code.
-                let repo_pen = if it.data.in_repo() && query.scope != Some(Kind::Code) {
-                    0.55
-                } else {
-                    1.0
-                };
-                let frec = frecency(usage.get(&it.data.path), now);
                 Hit {
                     item: it.data.clone(),
-                    score: base * kind_mult * depth_pen * repo_pen + frec,
-                    indices: idx,
+                    score: weigh(base, it.data, query, &terms) + frecency(usage.get(&it.data.path), now),
+                    indices: indices.iter().copied().filter(|&i| i < name_len).collect(),
                 }
             })
             .collect();
         hits.sort_by(|a, b| {
             b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.score)
                 .then_with(|| a.item.name.len().cmp(&b.item.name.len()))
                 .then_with(|| b.item.modified.cmp(&a.item.modified))
         });
         hits.truncate(limit);
         hits
     }
+}
+
+/// `base`, the fuzzy score, times the item's weights: its kind (unless the
+/// query is scoped), a boost when `terms` name a place or exactly an app, and
+/// penalties for deep paths and for source trees.
+fn weigh(base: f32, item: &Item, query: &Query, terms: &str) -> f32 {
+    let mut kind_mult = if query.scope.is_some() { 1.0 } else { item.kind.base_boost() };
+    let names_place = terms.chars().count() >= PLACE_MIN_PREFIX
+        && item.is_place()
+        && name_matches(item, |n| n.starts_with(terms));
+    if names_place {
+        kind_mult *= PLACE_BOOST;
+    } else if item.kind == Kind::App && name_matches(item, |n| n == terms) {
+        kind_mult *= EXACT_APP_BOOST;
+    }
+    let depth_pen = 1.0 - 0.015 * (item.depth().saturating_sub(3).min(10) as f32);
+    // Source trees are noise unless you asked for code.
+    let repo_pen = if item.in_repo() && query.scope != Some(Kind::Code) {
+        0.55
+    } else {
+        1.0
+    };
+    base * kind_mult * depth_pen * repo_pen
 }
 
 /// Whether the item's name or alt name, lowercased, satisfies `pred`.
@@ -279,15 +287,11 @@ pub fn frecency(u: Option<&Usage>, now: i64) -> f32 {
     (u.count.min(20) as f32 * mult * 6.0).min(250.0)
 }
 
-/// Kinds that should be loaded for a query, honouring lazy kinds.
-pub fn kinds_for_query(q: &Query, lazy: &[Kind]) -> Vec<Kind> {
+/// Kinds to load for a query: its scope, else every kind that is not lazy.
+pub fn kinds_for_query(q: &Query, cfg: &Config) -> Vec<Kind> {
     match q.scope {
         Some(k) => vec![k],
-        None => Kind::ALL
-            .iter()
-            .copied()
-            .filter(|k| !lazy.contains(k))
-            .collect(),
+        None => cfg.eager_kinds(),
     }
 }
 
@@ -296,7 +300,7 @@ mod tests {
     use super::*;
 
     fn searcher_with(names: &[&str]) -> Searcher {
-        let mut s = Searcher::new(HashMap::new(), Vec::new());
+        let s = Searcher::new(HashMap::new(), Vec::new());
         for n in names {
             s.push(Item::new(Kind::App, *n, format!("/Applications/{n}.app")));
         }
@@ -304,12 +308,7 @@ mod tests {
     }
 
     fn settle(s: &mut Searcher) {
-        for _ in 0..200 {
-            if !s.tick(10).running {
-                return;
-            }
-        }
-        panic!("matcher did not settle");
+        assert!(s.settle(Duration::from_secs(2)), "matcher did not settle");
     }
 
     fn names(s: &mut Searcher, raw: &str) -> Vec<String> {

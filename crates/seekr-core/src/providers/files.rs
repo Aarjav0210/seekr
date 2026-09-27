@@ -1,12 +1,11 @@
 //! File and folder discovery: a parallel, gitignore-aware walk of the configured roots.
 use crate::config::Config;
-use crate::item::{Item, Kind, FLAG_IN_REPO, PACKAGE_EXTS};
+use crate::item::{mtime, Item, Kind, FLAG_IN_REPO, PACKAGE_EXTS};
 use ignore::{WalkBuilder, WalkState};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Default, Clone)]
 pub struct WalkStats {
@@ -25,7 +24,7 @@ pub fn walk_files(cfg: &Config, mut on_item: impl FnMut(Item)) -> WalkStats {
     let skip: Arc<HashSet<String>> = Arc::new(cfg.skip_dirs.iter().cloned().collect());
     // Git repository roots seen so far. Parents are always visited before their
     // children, so a child can look its ancestors up here.
-    let repos: Arc<RwLock<HashSet<std::path::PathBuf>>> = Arc::new(RwLock::new(HashSet::new()));
+    let repos: Arc<RwLock<HashSet<PathBuf>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut builder = WalkBuilder::new(first);
     for r in rest {
         builder.add(r);
@@ -117,7 +116,7 @@ fn package_ext(p: &Path) -> Option<&'static str> {
         .copied()
 }
 
-fn in_repo(path: &Path, repos: &RwLock<HashSet<std::path::PathBuf>>) -> bool {
+fn in_repo(path: &Path, repos: &RwLock<HashSet<PathBuf>>) -> bool {
     let repos = repos.read().unwrap();
     if repos.is_empty() {
         return false;
@@ -137,12 +136,7 @@ fn make_item(kind: Kind, path: &Path, entry: &ignore::DirEntry, flags: u32) -> I
     item.flags = flags;
     if let Ok(md) = entry.metadata() {
         item.size = md.len();
-        item.modified = md
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        item.modified = mtime(&md);
     }
     if kind == Kind::App {
         if let Some(app) = crate::providers::apps::app_item(path) {
