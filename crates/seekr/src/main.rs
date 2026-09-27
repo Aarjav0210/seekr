@@ -98,6 +98,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate a calculation: `seekr calc '(1+2)^10/7'`. Exits non-zero when it isn't one.
+    Calc {
+        /// The expression; several words are joined with spaces. Quote it in the shell.
+        #[arg(required = true, allow_hyphen_values = true)]
+        expr: Vec<String>,
+        /// Emit JSON: input, expr, value, raw and display (or input and error).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -124,5 +133,12 @@ fn main() -> Result<()> {
             print,
             json,
         }) => cli::search_in(&keyword, &terms.join(" "), print, json),
+        Some(Cmd::Calc { mut expr, json }) => {
+            // `-5+3` has to reach the expression, so hyphen values are allowed,
+            // which makes a trailing `--json` look like part of it.
+            let json = json || expr.iter().any(|w| w == "--json");
+            expr.retain(|w| w != "--json");
+            cli::calc(&expr.join(" "), json)
+        }
     }
 }

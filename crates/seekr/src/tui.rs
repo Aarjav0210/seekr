@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use seekr_core::actions::{self, Action};
+use seekr_core::calc::{self, Calculation};
 use seekr_core::{AppSearch, Config, Hit, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
@@ -73,6 +74,8 @@ struct App {
     last_refresh: Instant,
     /// Set while the query starts with an app-search keyword (`arc: …`).
     app_search: Option<AppSearchMode>,
+    /// The query is a calculation: its answer is pinned above the hits, as row 0.
+    calc: Option<Calculation>,
 }
 
 /// Skip the wake-up refresh if one ran this recently.
@@ -132,6 +135,7 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         terminate: Arc::new(AtomicBool::new(false)),
         last_refresh: Instant::now(),
         app_search: None,
+        calc: None,
     };
     app.set_input(initial);
     if resident {
@@ -254,6 +258,7 @@ impl App {
         self.input_selected = false;
         self.selected = 0;
         self.dirty = true;
+        self.calc = calc::evaluate(&self.input).ok();
         let mut q = Query::parse_with(&self.input, &self.cfg.searches);
         if let Some(target) = q.app_search.take() {
             // Nothing from the index is shown in this mode; the matcher keeps its last query.
@@ -292,11 +297,12 @@ impl App {
 
     fn refresh_results(&mut self) {
         self.hits = self.searcher.results(RESULT_LIMIT);
-        if self.hits.is_empty() {
+        let rows = self.row_count();
+        if rows == 0 {
             self.selected = 0;
             self.list_state.select(None);
         } else {
-            self.selected = self.selected.min(self.hits.len() - 1);
+            self.selected = self.selected.min(rows - 1);
             self.list_state.select(Some(self.selected));
         }
         self.dirty = false;
@@ -349,15 +355,32 @@ impl App {
         }
     }
 
+    /// Rows pinned above the hits: the answer, when the query is a calculation.
+    /// `selected` counts them, so hit `i` is row `i + pinned_rows()`.
+    fn pinned_rows(&self) -> usize {
+        usize::from(self.calc.is_some())
+    }
+
+    fn row_count(&self) -> usize {
+        self.pinned_rows() + self.hits.len()
+    }
+
     fn selected_hit(&self) -> Option<&Hit> {
-        self.hits.get(self.selected)
+        self.selected
+            .checked_sub(self.pinned_rows())
+            .and_then(|i| self.hits.get(i))
+    }
+
+    /// The calculation, when its answer row is the selected one.
+    fn selected_calc(&self) -> Option<&Calculation> {
+        self.calc.as_ref().filter(|_| self.selected == 0)
     }
 
     fn move_sel(&mut self, delta: isize) {
-        if self.hits.is_empty() {
+        if self.row_count() == 0 {
             return;
         }
-        let n = self.hits.len() as isize;
+        let n = self.row_count() as isize;
         let cur = self.selected as isize;
         self.selected = (cur + delta).rem_euclid(n) as usize;
         self.list_state.select(Some(self.selected));
@@ -385,6 +408,24 @@ impl App {
             self.flash(format!("{} ✓", action.label()));
         }
         Ok(())
+    }
+
+    /// ⏎ or ^y on the answer row: copy the answer as a plain number. ⏎ in the
+    /// launcher also hides it and hands focus back (nothing was opened); a
+    /// finder in a terminal stays, with the answer still on screen.
+    fn copy_calc(&mut self, dismiss: bool) {
+        let Some(raw) = self.selected_calc().map(|c| c.raw.clone()) else {
+            return;
+        };
+        if let Err(e) = actions::copy_to_clipboard(&raw) {
+            self.flash(format!("Copy: {e}"));
+            return;
+        }
+        if dismiss && self.resident {
+            self.dismiss(true);
+        } else {
+            self.flash(format!("copied {raw} ✓"));
+        }
     }
 
     fn clear_input(&mut self) {
@@ -586,11 +627,13 @@ impl App {
                     self.flash("cleared · esc again to quit");
                 }
             }
+            (KeyCode::Enter, _) if self.selected_calc().is_some() => self.copy_calc(true),
             (KeyCode::Enter, _) => self.act(Action::Open, true)?,
             (KeyCode::Char('r'), true) | (KeyCode::Char('o'), true) => {
                 self.act(Action::Reveal, true)?
             }
             (KeyCode::Char('e'), true) => self.act(Action::OpenParent, true)?,
+            (KeyCode::Char('y'), true) if self.selected_calc().is_some() => self.copy_calc(false),
             (KeyCode::Char('y'), true) => self.act(Action::CopyPath, false)?,
             (KeyCode::Char('v'), true) => self.act(Action::QuickLook, false)?,
             (KeyCode::Char('x'), true) => self.refresh_index(true),
@@ -608,8 +651,8 @@ impl App {
                 self.list_state.select(Some(0));
             }
             (KeyCode::End, _) => {
-                if !self.hits.is_empty() {
-                    self.selected = self.hits.len() - 1;
+                if self.row_count() > 0 {
+                    self.selected = self.row_count() - 1;
                     self.list_state.select(Some(self.selected));
                 }
             }
@@ -737,7 +780,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             });
             if app.input.is_empty() {
                 spans.push(Span::styled(
-                    "type to search · app: doc: dir: in: ext: · ⇥ cycles scope",
+                    "type to search · app: doc: dir: in: ext: · ⇥ cycles scope · 2+2 calculates",
                     dim,
                 ));
             }
@@ -757,6 +800,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         } else {
             "type something · ⌫ back · esc clear ".into()
         })
+    } else if app.selected_calc().is_some() {
+        Some("⏎ copy answer · esc clear ".into())
     } else if let Some((s, _)) = app.search_for_selection() {
         Some(format!("⇥ search in {} · esc clear ", s.name()))
     } else {
@@ -792,7 +837,7 @@ fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
         draw_home(f, area, app);
         return;
     }
-    if app.hits.is_empty() && !app.loading() {
+    if app.hits.is_empty() && app.calc.is_none() && !app.loading() {
         draw_empty(f, area, app);
         return;
     }
@@ -805,7 +850,8 @@ fn draw_results(f: &mut Frame, area: Rect, app: &mut App) {
 /// The result rows, with the selection highlighted, filling `area`.
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = app.hits.iter().map(|h| result_item(h, width)).collect();
+    let mut items: Vec<ListItem> = app.calc.iter().map(|c| calc_item(c, width)).collect();
+    items.extend(app.hits.iter().map(|h| result_item(h, width)));
     let list = List::new(items)
         .highlight_style(
             Style::default()
@@ -814,6 +860,23 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
         )
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+/// The pinned answer row: `= 8,435.5714285714  (1 + 2)^10 / 7`.
+fn calc_item(c: &Calculation, width: usize) -> ListItem<'static> {
+    let answer = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled("= ", answer),
+        Span::styled(c.display.clone(), answer),
+    ];
+    let room = width.saturating_sub(c.display.chars().count() + 2);
+    if room > 8 {
+        spans.push(Span::styled(
+            format!("  {}", ellipsize(&c.expr, room - 2)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn result_item(h: &Hit, width: usize) -> ListItem<'static> {
@@ -921,7 +984,8 @@ fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
     let key = Style::default().fg(Color::Cyan);
     let mut hints = vec![
         Line::from(vec![
-            Span::styled("type to find apps, documents, folders and media", dim),
+            Span::styled("type to find apps, documents, folders and media, or ", dim),
+            Span::styled("2+2", key),
         ]),
         Line::from(vec![
             Span::styled("app:", key),
@@ -1072,6 +1136,8 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("esc ", key),
             Span::raw("clear"),
         ]));
+    } else if let Some(c) = app.selected_calc() {
+        lines = calc_details(c, area.width.saturating_sub(2) as usize, app.resident);
     } else if let Some(h) = app.selected_hit() {
         let it = &h.item;
         lines.push(Line::from(vec![Span::styled(
@@ -1164,6 +1230,70 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Details for the answer row: the expression, the answer in large digits
+/// when they fit, and what ⏎ does.
+fn calc_details(c: &Calculation, width: usize, resident: bool) -> Vec<Line<'static>> {
+    let label = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Cyan);
+    let answer = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::from(Span::styled("Calculator", answer)),
+        Line::from(Span::styled(c.expr.clone(), label)),
+        Line::from(""),
+    ];
+    match big_digits(&c.display).filter(|rows| rows[0].chars().count() + 1 <= width) {
+        Some(rows) => {
+            for row in rows {
+                lines.push(Line::from(Span::styled(format!(" {row}"), answer)));
+            }
+        }
+        None => lines.push(Line::from(Span::styled(format!("= {}", c.display), answer))),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled("value  ", label), Span::raw(c.raw.clone())]));
+    lines.push(Line::from(""));
+    // In the launcher ⏎ also hides the window; ^y copies and stays.
+    let mut keys = vec![Span::styled("⏎ ", key), Span::raw("copy  ")];
+    if resident {
+        keys[1] = Span::raw("copy and hide  ");
+        keys.extend([Span::styled("^y ", key), Span::raw("copy  ")]);
+    }
+    keys.extend([Span::styled("↓ ", key), Span::raw("results")]);
+    lines.push(Line::from(keys));
+    lines
+}
+
+/// `display` in three-row digits, or None if it has characters without one
+/// (scientific notation). Commas hang below the line, like a comma.
+fn big_digits(display: &str) -> Option<[String; 3]> {
+    let mut rows: [String; 3] = Default::default();
+    for (i, ch) in display.chars().enumerate() {
+        let glyph: [&str; 3] = match ch {
+            '0' => ["┏━┓", "┃ ┃", "┗━┛"],
+            '1' => ["╺┓ ", " ┃ ", "╺┻╸"],
+            '2' => ["╺━┓", "┏━┛", "┗━╸"],
+            '3' => ["╺━┓", " ━┫", "╺━┛"],
+            '4' => ["╻ ╻", "┗━┫", "  ╹"],
+            '5' => ["┏━╸", "┗━┓", "╺━┛"],
+            '6' => ["┏━╸", "┣━┓", "┗━┛"],
+            '7' => ["╺━┓", "  ┃", "  ╹"],
+            '8' => ["┏━┓", "┣━┫", "┗━┛"],
+            '9' => ["┏━┓", "┗━┫", "╺━┛"],
+            '-' => ["   ", "╺━╸", "   "],
+            '.' => [" ", " ", "▪"],
+            ',' => [" ", " ", "╻"],
+            _ => return None,
+        };
+        for (row, part) in rows.iter_mut().zip(glyph) {
+            if i > 0 {
+                row.push(' ');
+            }
+            row.push_str(part);
+        }
+    }
+    Some(rows)
+}
+
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = Vec::new();
     if let Some(err) = app.loader_error() {
@@ -1192,6 +1322,8 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let esc = if app.resident { "esc clear/hide · ^c quit" } else { "esc clear/quit" };
     let keys = if app.app_search.is_some() {
         format!("  ⏎ search · ^y copy url · ⌫ back · {esc}")
+    } else if app.selected_calc().is_some() {
+        format!("  ⏎ copy answer · ^y copy · ↑↓ results · {esc}")
     } else {
         format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh · {esc}")
     };
