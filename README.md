@@ -109,7 +109,9 @@ you actually launch.
 | `^x`         | refresh the index                             |
 | `^l`         | open the definition card's word in Dictionary.app |
 | `esc`        | clear the query; on an empty query, quit (launcher: hide) |
-| `^u` / `^w`  | clear the query / delete the last word        |
+| `←` `→`      | move the cursor in the query; `⌥←` `⌥→` by word, `⌘←` `⌘→` (or `^a`) to either end |
+| `^u` / `^w`  | delete to the start of the query / the word before the cursor (`⌘⌫` / `⌥⌫`) |
+| `⌦`          | delete the character after the cursor         |
 | `^c`         | quit, also in the launcher                    |
 | `⌘space`     | launcher only (the hotkey): hide, keeping the query selected for next time |
 

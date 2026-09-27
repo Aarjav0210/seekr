@@ -47,6 +47,8 @@ struct App {
     idx: Index,
     searcher: Searcher,
     input: String,
+    /// Caret position in `input`, in chars.
+    cursor: usize,
     selected: usize,
     hits: Vec<Hit>,
     list_state: ListState,
@@ -119,6 +121,7 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         idx,
         searcher,
         input: String::new(),
+        cursor: 0,
         selected: 0,
         hits: Vec::new(),
         list_state: ListState::default(),
@@ -259,6 +262,7 @@ impl App {
     }
 
     fn set_input(&mut self, s: String) {
+        self.cursor = s.chars().count();
         self.input = s;
         self.input_selected = false;
         self.selected = 0;
@@ -438,15 +442,93 @@ impl App {
         self.set_input(String::new());
     }
 
-    /// Delete the last word (`^w`, `⌥⌫`). A trailing scope prefix like `doc:` counts as a word.
+    /// Byte offset of char position `c` in the query.
+    fn byte_at(&self, c: usize) -> usize {
+        self.input.char_indices().nth(c).map_or(self.input.len(), |(i, _)| i)
+    }
+
+    /// Chars at the start of the query the caret can't enter: the `arc: `
+    /// keyword that the app-search chip stands for.
+    fn locked_prefix(&self) -> usize {
+        match &self.app_search {
+            Some(m) if self.input.ends_with(m.terms.as_str()) => {
+                self.input.chars().count() - m.terms.chars().count()
+            }
+            _ => 0,
+        }
+    }
+
+    fn move_cursor(&mut self, to: usize) {
+        self.cursor = to.clamp(self.locked_prefix(), self.input.chars().count());
+    }
+
+    /// Replace chars `from..to` with `text` and leave the caret after it.
+    fn splice(&mut self, from: usize, to: usize, text: &str) {
+        let (a, b) = (self.byte_at(from), self.byte_at(to));
+        let s = format!("{}{text}{}", &self.input[..a], &self.input[b..]);
+        self.set_input(s);
+        self.move_cursor(from + text.chars().count());
+    }
+
+    /// Where the word before the caret starts (`⌥←`, `^w`): skip spaces, then non-spaces.
+    fn word_start(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        i.max(self.locked_prefix())
+    }
+
+    /// Where the word after the caret ends (`⌥→`).
+    fn word_end(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.cursor;
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Delete the word before the caret (`^w`, `⌥⌫`). A scope prefix like `doc:` counts as a word.
     fn delete_word(&mut self) {
-        let trimmed = self.input.trim_end();
-        let cut = trimmed
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let new = self.input[..cut].to_string();
-        self.set_input(new);
+        let start = self.word_start();
+        self.splice(start, self.cursor, "");
+    }
+
+    /// Caret keys, shared by the index and app-search modes. False: not one of them.
+    fn edit_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let alt = mods.contains(KeyModifiers::ALT);
+        // ⌘ arrows arrive as SUPER (contrib/kitty/seekr.conf maps them).
+        let cmd = mods.contains(KeyModifiers::SUPER);
+        let (lo, hi) = (self.locked_prefix(), self.input.chars().count());
+        match code {
+            KeyCode::Left if cmd => self.move_cursor(lo),
+            KeyCode::Right if cmd => self.move_cursor(hi),
+            KeyCode::Left if alt || ctrl => self.move_cursor(self.word_start()),
+            KeyCode::Right if alt || ctrl => self.move_cursor(self.word_end()),
+            KeyCode::Char('b') if alt => self.move_cursor(self.word_start()),
+            KeyCode::Char('f') if alt => self.move_cursor(self.word_end()),
+            KeyCode::Left => self.move_cursor(self.cursor.saturating_sub(1)),
+            KeyCode::Right => self.move_cursor(self.cursor + 1),
+            KeyCode::Char('a') if ctrl => self.move_cursor(lo),
+            KeyCode::Char('u') if ctrl => self.splice(lo, self.cursor, ""),
+            KeyCode::Char('w') if ctrl => self.delete_word(),
+            KeyCode::Backspace if alt => self.delete_word(),
+            KeyCode::Backspace if cmd => self.splice(lo, self.cursor, ""),
+            KeyCode::Backspace if self.cursor > lo => self.splice(self.cursor - 1, self.cursor, ""),
+            KeyCode::Delete if self.cursor < hi => self.splice(self.cursor, self.cursor + 1, ""),
+            KeyCode::Char(ch) if !ctrl && !alt => self.splice(self.cursor, self.cursor, &ch.to_string()),
+            _ => return false,
+        }
+        true
     }
 
     /// ⇥: hand the query to the selected app's search (or to the search whose
@@ -507,6 +589,8 @@ impl App {
             (KeyCode::Enter, _) => self.run_app_search(),
             // Nothing typed yet: ⌫ steps out of the search and leaves the keyword.
             (KeyCode::Backspace, _) if nothing_typed => self.set_input(keyword),
+            // At the start of the terms, ⌫ has nothing it may delete.
+            (KeyCode::Backspace, _) if self.cursor <= self.locked_prefix() => {}
             (KeyCode::Char('y'), true) => match actions::copy_to_clipboard(&url) {
                 Ok(()) => self.flash("Copy URL ✓"),
                 Err(e) => self.flash(format!("Copy URL: {e}")),
@@ -616,6 +700,11 @@ impl App {
                     self.clear_input();
                     return Ok(());
                 }
+                // Like a text field: ← collapses the selection to its start.
+                (KeyCode::Left, _) => {
+                    self.move_cursor(0);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -663,20 +752,9 @@ impl App {
                     self.list_state.select(Some(self.selected));
                 }
             }
-            (KeyCode::Char('u'), true) => self.clear_input(),
-            (KeyCode::Char('w'), true) => self.delete_word(),
-            (KeyCode::Backspace, _) if mods.contains(KeyModifiers::ALT) => self.delete_word(),
-            (KeyCode::Backspace, _) => {
-                let mut s = self.input.clone();
-                s.pop();
-                self.set_input(s);
+            _ => {
+                self.edit_key(code, mods);
             }
-            (KeyCode::Char(ch), false) => {
-                let mut s = self.input.clone();
-                s.push(ch);
-                self.set_input(s);
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -812,6 +890,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     let text_end = area.x + width as u16;
+    // The caret: after the typed text, or inside it once moved with the arrows.
+    let behind = app.input.chars().count().saturating_sub(app.cursor) as u16;
+    let caret = if app.input_selected { text_end } else { text_end.saturating_sub(behind) };
     let tip: Option<String> = if app.input.is_empty() {
         None
     } else if app.input_selected {
@@ -838,7 +919,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(Paragraph::new(Span::styled(tip, dim)), tip_area);
         }
     }
-    f.set_cursor_position(Position::new(text_end.min(area.right().saturating_sub(1)), area.y));
+    f.set_cursor_position(Position::new(caret.min(area.right().saturating_sub(1)), area.y));
 }
 
 fn results_block(app: &App) -> Block<'static> {
