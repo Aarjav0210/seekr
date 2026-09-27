@@ -252,8 +252,10 @@ fn lex_number(cs: &[char], mut i: usize) -> Result<(Tok, usize), CalcError> {
 }
 
 /// `2024-01-05`, `12/25/2024`, `555-123-4567`, `555-1234`, `2023-2024`:
-/// integers joined by `-` or `/` with no spaces read as dates, phone numbers
-/// and ranges, not sums. With spaces (`2024 - 1 - 5`) they are sums.
+/// integers joined by `-` or `/` with no spaces, in the shape of a date, a
+/// phone number or a year range, are searched for rather than computed. Any
+/// other chain (`2000-1000-500`, `100/4/5`) is a calculation, and with spaces
+/// (`2024 - 1 - 5`) every chain is.
 fn looks_like_date_or_phone(toks: &[Tok], s: &str) -> bool {
     if s.chars().any(char::is_whitespace) {
         return false;
@@ -262,10 +264,6 @@ fn looks_like_date_or_phone(toks: &[Tok], s: &str) -> bool {
         Some(Tok::Op('+')) => &toks[1..],
         _ => toks,
     };
-    let int = |t: &Tok| match t {
-        Tok::Num(_, lit) if lit.chars().all(|c| c.is_ascii_digit()) => Some(lit.len()),
-        _ => None,
-    };
     if toks.len() < 3 || toks.len() % 2 == 0 {
         return false;
     }
@@ -273,18 +271,35 @@ fn looks_like_date_or_phone(toks: &[Tok], s: &str) -> bool {
         Tok::Op(c @ ('-' | '/')) => c,
         _ => return false,
     };
-    let mut lens = Vec::new();
+    // (digits, value) of each integer part.
+    let mut parts = Vec::new();
     for (k, t) in toks.iter().enumerate() {
-        if k % 2 == 0 {
-            match int(t) {
-                Some(n) => lens.push(n),
-                None => return false,
+        match t {
+            Tok::Num(v, lit) if k % 2 == 0 && lit.chars().all(|c| c.is_ascii_digit()) => {
+                parts.push((lit.len(), *v))
             }
-        } else if *t != Tok::Op(sep) {
-            return false;
+            Tok::Op(c) if k % 2 == 1 && *c == sep => {}
+            _ => return false,
         }
     }
-    lens.len() >= 3 || (sep == '-' && (3..=4).contains(&lens[0]) && lens[1] == 4)
+    let day_month = |a: f64, b: f64| a >= 1.0 && b >= 1.0 && a <= 31.0 && b <= 31.0 && a.min(b) <= 12.0;
+    let year = |v: f64| (1900.0..=2099.0).contains(&v);
+    match (sep, parts.as_slice()) {
+        // 12/25/2024, 25/12/24
+        ('/', &[(1..=2, a), (1..=2, b), (2 | 4, _)]) => day_month(a, b),
+        // 2024/01/05
+        ('/', &[(4, y), (1..=2, m), (1..=2, d)]) => year(y) && day_month(m, d),
+        // 2024-01-05
+        ('-', &[(4, y), (1..=2, m), (1..=2, d)]) => year(y) && day_month(m, d),
+        // 05-01-2024
+        ('-', &[(1..=2, a), (1..=2, b), (4, y)]) => year(y) && day_month(a, b),
+        // 555-123-4567, 1-555-123-4567, 555-1234
+        ('-', &[(3, _), (3, _), (4, _)]) | ('-', &[(1, _), (3, _), (3, _), (4, _)]) => true,
+        ('-', &[(3, _), (4, _)]) => true,
+        // 2023-2024
+        ('-', &[(4, a), (4, b)]) => year(a) && year(b) && b > a,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +748,14 @@ mod tests {
         ("1000-250", "750"),
         ("12 / 25 / 2024", "0.00023715415019763"),
         ("0 - 5", "-5"),
+        ("2000-1000-500", "500"),
+        ("5000/10/5", "100"),
+        ("100/4/5", "5"),
+        ("10-2-3-1", "4"),
+        ("1500-1000", "500"),
+        ("2024-2023", "1"),
+        ("45-13-2024", "-1992"),
+        ("12/25/7", "0.068571428571429"),
     ];
 
     /// Queries that must not produce an answer.
@@ -768,6 +791,10 @@ mod tests {
         "(555) 123-4567",
         "+1 555 123 4567",
         "2023-2024",
+        "1-555-123-4567",
+        "25-12-2024",
+        "5/1/24",
+        "2000/10/5",
         "01+1",
         "007*2",
         "1+01",
