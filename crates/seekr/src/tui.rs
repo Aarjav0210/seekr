@@ -61,12 +61,12 @@ struct App {
     hidden: bool,
     /// Draw one more frame after dismissing, so the window shows a clean slate when revealed.
     final_draw: bool,
-    /// The whole query is selected (after a Ctrl+Space hide with text): the next
+    /// The whole query is selected (after a hotkey hide with text): the next
     /// character replaces it, any other key keeps it.
     input_selected: bool,
     /// Set by SIGUSR1 when the launcher reveals the window.
     wake: Arc<AtomicBool>,
-    /// Set by SIGUSR2 when the launcher hid the window itself (Ctrl+Space toggle).
+    /// Set by SIGUSR2 when the launcher hid the window itself (hotkey toggle).
     park: Arc<AtomicBool>,
     /// Set by SIGTERM/SIGHUP so a resident process still restores the terminal and cleans up.
     terminate: Arc<AtomicBool>,
@@ -324,7 +324,7 @@ impl App {
         }
     }
 
-    /// The launcher hid the window without asking (Ctrl+Space while we had focus):
+    /// The launcher hid the window without asking (the hotkey while we had focus):
     /// stop drawing, keep the query, and select it so the next reveal can either
     /// type over it or carry on with it.
     fn parked(&mut self) {
@@ -556,7 +556,7 @@ impl App {
 
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Result<()> {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
-        // Selected query (kept from a Ctrl+Space hide): a character or backspace
+        // Selected query (kept from a hotkey hide): a character or backspace
         // replaces it, like a selected text field; any other key deselects and
         // acts as usual, so arrows, Enter, Tab and ^-chords keep the text.
         if std::mem::take(&mut self.input_selected) {

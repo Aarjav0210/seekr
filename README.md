@@ -22,29 +22,42 @@ you whether Spotlight is broken on your machine.
 
 ```sh
 cargo install --path crates/seekr      # binary → ~/.cargo/bin/seekr
-contrib/install-launcher.sh            # optional: Ctrl+Space popup
+contrib/install-launcher.sh            # optional: Cmd+Space popup
 ```
 
 The launcher script installs kitty and Hammerspoon, drops
 `contrib/hammerspoon/seekr.lua` into `~/.hammerspoon` and
-`contrib/kitty/seekr.conf` into `~/.config/seekr/kitty.conf`. Ctrl+Space opens
+`contrib/kitty/seekr.conf` into `~/.config/seekr/kitty.conf`. Cmd+Space opens
 an undecorated kitty window (no title bar) running `seekr --resident` directly,
 with no login shell in between, so `~/.zshrc` is never sourced. The window is a
 kitty panel (kitty 0.42 or newer), which is on every desktop at once: it pops up
 on whatever desktop you are on, on the screen you are working on, instead of
-switching you back to the desktop it was first opened on. That kitty is
-kept out of Cmd+Tab and the Dock; Ctrl+Space is the only way to it. The first press
+switching you back to the desktop it was first opened on. kitty itself shows
+and hides the window (its `--toggle-visibility`), because a window that macOS
+hid and showed again lands back on the desktop it was created on and only its
+owner can re-attach it to the current one. That kitty is
+kept out of Cmd+Tab and the Dock; the hotkey is the only way to it. The first press
 creates the window in a few hundred milliseconds. After that seekr stays alive:
-Enter and Esc hide the window instead of quitting, and the next Ctrl+Space
+Enter and Esc hide the window instead of quitting, and the next press
 reveals it again within a couple of frames, ready to type, while the index
 refreshes in the background. After Enter the app that was just opened keeps
-the focus; after Esc, focus goes back to the window you came from. Ctrl+Space while seekr is in front hides it again,
+the focus; after Esc, focus goes back to the window you came from. Cmd+Space while seekr is in front hides it again,
 whatever the query says; the query is kept and comes back selected, so typing
 replaces it and an arrow key (or Enter, Tab, any `^` chord) keeps it. Ctrl+C
 inside seekr quits it for real. The
 resident process holds the index in memory (tens of MB) and idles otherwise.
 macOS will ask once to allow Hammerspoon under Accessibility (global hotkeys,
 window placement).
+
+Cmd+Space is Spotlight's shortcut and, on macOS 15, Siri's (hold), so the
+installer turns both shortcuts off (Spotlight and Siri themselves are
+untouched; System Settings › Keyboard › Keyboard Shortcuts › Spotlight and
+System Settings › Siri › Keyboard shortcut turn them back on). For another
+key run `contrib/install-launcher.sh --hotkey ctrl+space`: the script then
+gives Cmd+Space back to Spotlight and Siri, and later runs keep the key you
+chose. If some other app already holds the key as a shared global hotkey,
+Hammerspoon cannot register it and the Lua watches for the key with an event
+tap instead; the installer prints which of the two is in use.
 
 ## Use
 
@@ -95,7 +108,7 @@ you actually launch.
 | `esc`        | clear the query; on an empty query, quit (launcher: hide) |
 | `^u` / `^w`  | clear the query / delete the last word        |
 | `^c`         | quit, also in the launcher                    |
-| `⌃space`     | launcher only: hide, keeping the query selected for next time |
+| `⌘space`     | launcher only (the hotkey): hide, keeping the query selected for next time |
 
 ### Searching inside apps
 
@@ -156,7 +169,7 @@ crates/seekr-core   library, no UI: items, query parser, providers (apps, files)
                     SQLite index + usage log, nucleo matcher + re-ranking,
                     actions (open/reveal/copy/quick-look), app searches (⇥), doctor
 crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)
-contrib/            Ctrl+Space launcher (Hammerspoon config, kitty config)
+contrib/            Cmd+Space launcher (Hammerspoon config, kitty config)
 ```
 
 Index: `~/Library/Application Support/seekr/index.db`.
