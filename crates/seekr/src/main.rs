@@ -16,7 +16,7 @@ struct Cli {
     cmd: Option<Cmd>,
 
     /// Stay alive after Enter/Esc: hide the launcher window instead of quitting, so the
-    /// next Ctrl+Space shows the UI instantly. Used by contrib/ (Hammerspoon + Terminal).
+    /// next hotkey press (Cmd+Space) shows the UI instantly. Used by contrib/ (Hammerspoon + kitty).
     #[arg(long)]
     resident: bool,
 
