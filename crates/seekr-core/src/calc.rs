@@ -1,11 +1,12 @@
 //! Calculator: evaluate a query that is a mathematical expression (`2+2*3`,
 //! `(1+2)^10/7`, `sqrt(2)`, `15% of 80`), like Spotlight does.
 //!
-//! [`evaluate`] is deliberately picky, because an answer pre-empts the search
-//! results: plain numbers (`2024`), dates (`2024-01-05`), phone numbers
-//! (`555-123-4567`), versions (`1.2.3`), filenames (`IMG_1234`, `report-2`)
-//! and single words are not expressions. It takes at least one operator or
-//! function, numbers without leading zeros, and nothing it doesn't understand.
+//! Anything that parses as arithmetic is answered, dates (`2024-01-05`) and
+//! phone numbers (`555-123-4567`) included; the answer is pinned above the
+//! search results, which still follow. It takes at least one operator or
+//! function and nothing it doesn't understand, so plain numbers (`2024`),
+//! versions (`1.2.3`), filenames (`IMG_1234`, `report-2`) and words are not
+//! expressions.
 //!
 //! Grammar, loosest binding first:
 //! - `a + b`, `a - b`; `a + b%` and `a - b%` add or take off b percent of a
@@ -69,9 +70,6 @@ pub fn evaluate(input: &str) -> Result<Calculation, CalcError> {
     let s = s.strip_prefix('=').unwrap_or(s);
     let s = s.strip_suffix('=').unwrap_or(s).trim();
     let toks = lex(s)?;
-    if looks_like_date_or_phone(&toks, s) {
-        return Err(CalcError::NotAnExpression);
-    }
     let mut p = Parser { toks: &toks, pos: 0 };
     let node = p.expr()?;
     if p.pos != toks.len() || !node.has_operator() {
@@ -189,8 +187,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, CalcError> {
 }
 
 /// A number starting at `cs[i]`: digits with optional `,` or `_` thousands
-/// separators (strictly grouped by three), a fraction, an exponent. A leading
-/// zero followed by more digits (`01`, `007`) is not a number.
+/// separators (strictly grouped by three), a fraction, an exponent.
 fn lex_number(cs: &[char], mut i: usize) -> Result<(Tok, usize), CalcError> {
     let mut lit = String::new();
     let mut groups: Vec<usize> = vec![0];
@@ -212,9 +209,6 @@ fn lex_number(cs: &[char], mut i: usize) -> Result<(Tok, usize), CalcError> {
         i += 1;
     }
     if groups.len() > 1 && (!(1..=3).contains(&groups[0]) || groups[1..].iter().any(|&g| g != 3)) {
-        return Err(CalcError::NotAnExpression);
-    }
-    if lit.len() > 1 && lit.starts_with('0') {
         return Err(CalcError::NotAnExpression);
     }
     if cs.get(i) == Some(&'.') {
@@ -249,57 +243,6 @@ fn lex_number(cs: &[char], mut i: usize) -> Result<(Tok, usize), CalcError> {
         return Err(CalcError::Undefined);
     }
     Ok((Tok::Num(v, lit), i))
-}
-
-/// `2024-01-05`, `12/25/2024`, `555-123-4567`, `555-1234`, `2023-2024`:
-/// integers joined by `-` or `/` with no spaces, in the shape of a date, a
-/// phone number or a year range, are searched for rather than computed. Any
-/// other chain (`2000-1000-500`, `100/4/5`) is a calculation, and with spaces
-/// (`2024 - 1 - 5`) every chain is.
-fn looks_like_date_or_phone(toks: &[Tok], s: &str) -> bool {
-    if s.chars().any(char::is_whitespace) {
-        return false;
-    }
-    let toks = match toks.first() {
-        Some(Tok::Op('+')) => &toks[1..],
-        _ => toks,
-    };
-    if toks.len() < 3 || toks.len() % 2 == 0 {
-        return false;
-    }
-    let sep = match toks[1] {
-        Tok::Op(c @ ('-' | '/')) => c,
-        _ => return false,
-    };
-    // (digits, value) of each integer part.
-    let mut parts = Vec::new();
-    for (k, t) in toks.iter().enumerate() {
-        match t {
-            Tok::Num(v, lit) if k % 2 == 0 && lit.chars().all(|c| c.is_ascii_digit()) => {
-                parts.push((lit.len(), *v))
-            }
-            Tok::Op(c) if k % 2 == 1 && *c == sep => {}
-            _ => return false,
-        }
-    }
-    let day_month = |a: f64, b: f64| a >= 1.0 && b >= 1.0 && a <= 31.0 && b <= 31.0 && a.min(b) <= 12.0;
-    let year = |v: f64| (1900.0..=2099.0).contains(&v);
-    match (sep, parts.as_slice()) {
-        // 12/25/2024, 25/12/24
-        ('/', &[(1..=2, a), (1..=2, b), (2 | 4, _)]) => day_month(a, b),
-        // 2024/01/05
-        ('/', &[(4, y), (1..=2, m), (1..=2, d)]) => year(y) && day_month(m, d),
-        // 2024-01-05
-        ('-', &[(4, y), (1..=2, m), (1..=2, d)]) => year(y) && day_month(m, d),
-        // 05-01-2024
-        ('-', &[(1..=2, a), (1..=2, b), (4, y)]) => year(y) && day_month(a, b),
-        // 555-123-4567, 1-555-123-4567, 555-1234
-        ('-', &[(3, _), (3, _), (4, _)]) | ('-', &[(1, _), (3, _), (3, _), (4, _)]) => true,
-        ('-', &[(3, _), (4, _)]) => true,
-        // 2023-2024
-        ('-', &[(4, a), (4, b)]) => year(a) && year(b) && b > a,
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -756,6 +699,17 @@ mod tests {
         ("2024-2023", "1"),
         ("45-13-2024", "-1992"),
         ("12/25/7", "0.068571428571429"),
+        ("2000/10/5", "40"),
+        ("2024-01-05", "2018"),
+        ("2024-1-5", "2018"),
+        ("2024/01/05", "404.8"),
+        ("12/25/2024", "0.00023715415019763"),
+        ("555-1234", "-679"),
+        ("555-123-4567", "-4135"),
+        ("+1-555-123-4567", "-5244"),
+        ("2023-2024", "-1"),
+        ("01+1", "2"),
+        ("007*2", "14"),
     ];
 
     /// Queries that must not produce an answer.
@@ -771,10 +725,6 @@ mod tests {
         "e",
         "(5)",
         "-(5)",
-        "2024-01-05",
-        "2024-1-5",
-        "2024/01/05",
-        "12/25/2024",
         "05.01.2024",
         "10:30",
         "IMG_1234",
@@ -785,19 +735,8 @@ mod tests {
         "1.2.3+1",
         "report-2",
         "report-2.pdf",
-        "555-1234",
-        "555-123-4567",
-        "+1-555-123-4567",
         "(555) 123-4567",
         "+1 555 123 4567",
-        "2023-2024",
-        "1-555-123-4567",
-        "25-12-2024",
-        "5/1/24",
-        "2000/10/5",
-        "01+1",
-        "007*2",
-        "1+01",
         "1,23+1",
         "1,2345+1",
         "1,000_000+1",

@@ -153,10 +153,10 @@ and stays, `↓` moves on to the files. `+ - * / ^ %`, `×` `÷`, `3 x 4`,
 parentheses, `1e3`, `1,234,567`, `pi` `e`, `5!`, `50%`, `15% of 80`,
 `200 + 10%` (220), and `sqrt abs round floor ceil ln log log2 sin cos tan
 asin acos atan exp` (radians) all work. Answers keep 14 significant digits
-and switch to scientific notation beyond 1e15. It only triggers on a real
-expression: plain numbers, dates (`2024-01-05`), phone numbers, versions
-(`1.2.3`) and names like `IMG_1234` or `report-2` search as usual; `1/0` has
-no answer. `seekr calc --json` prints `{input, expr, value, raw, display}`.
+and switch to scientific notation beyond 1e15. Anything that is arithmetic
+gets an answer, dates (`2024-01-05` = 2018) and phone numbers included, with
+the matching files still listed below it; plain numbers, versions (`1.2.3`)
+and names like `IMG_1234` or `report-2` just search. `1/0` has no answer. `seekr calc --json` prints `{input, expr, value, raw, display}`.
 
 ### Definitions
 
