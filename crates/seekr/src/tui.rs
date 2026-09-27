@@ -12,15 +12,16 @@ use ratatui::crossterm::terminal::SetTitle;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use seekr_core::actions::{self, Action};
 use seekr_core::calc::{self, Calculation};
+use seekr_core::define::{self, Definition, Sense};
 use seekr_core::{AppSearch, Config, Hit, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RESULT_LIMIT: usize = 200;
@@ -76,6 +77,8 @@ struct App {
     app_search: Option<AppSearchMode>,
     /// The query is a calculation: its answer is pinned above the hits, as row 0.
     calc: Option<Calculation>,
+    /// Dictionary entry for a one-word query, looked up in the background.
+    dict: DictLookup,
 }
 
 /// Skip the wake-up refresh if one ran this recently.
@@ -136,6 +139,7 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
         last_refresh: Instant::now(),
         app_search: None,
         calc: None,
+        dict: DictLookup::spawn(),
     };
     app.set_input(initial);
     if resident {
@@ -205,6 +209,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         }
         was_running = st.running;
         app.announce_refreshes();
+        app.dict.poll();
         if let Some((_, t)) = &app.status {
             if t.elapsed() > Duration::from_secs(3) {
                 app.status = None;
@@ -260,6 +265,7 @@ impl App {
         self.dirty = true;
         self.calc = calc::evaluate(&self.input).ok();
         let mut q = Query::parse_with(&self.input, &self.cfg.searches);
+        self.dict.want(define::word_for_query(&q));
         if let Some(target) = q.app_search.take() {
             // Nothing from the index is shown in this mode; the matcher keeps its last query.
             let app = self.app_search.take().and_then(|m| m.app);
@@ -637,6 +643,7 @@ impl App {
             (KeyCode::Char('y'), true) => self.act(Action::CopyPath, false)?,
             (KeyCode::Char('v'), true) => self.act(Action::QuickLook, false)?,
             (KeyCode::Char('x'), true) => self.refresh_index(true),
+            (KeyCode::Char('l'), true) => self.open_definition(),
             (KeyCode::Tab, _) => self.tab(),
             (KeyCode::Down, _) | (KeyCode::Char('n'), true) | (KeyCode::Char('j'), true) => {
                 self.move_sel(1)
@@ -715,14 +722,31 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Compact launcher windows: give the whole width to results.
     if area.width < COMPACT_WIDTH {
-        draw_results(f, rows[1], app);
+        if definition_replaces_results(app) {
+            draw_definition_without_hits(f, rows[1], app);
+        } else {
+            let (list, card) = split_for_definition(rows[1], app, 45, 5);
+            draw_results(f, list, app);
+            if let Some(card) = card {
+                draw_definition(f, card, app);
+            }
+        }
     } else {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(rows[1]);
-        draw_results(f, cols[0], app);
-        draw_preview(f, cols[1], app);
+        if definition_replaces_results(app) {
+            draw_definition_without_hits(f, cols[0], app);
+            draw_preview(f, cols[1], app);
+        } else {
+            draw_results(f, cols[0], app);
+            let (details, card) = split_for_definition(cols[1], app, 55, 12);
+            draw_preview(f, details, app);
+            if let Some(card) = card {
+                draw_definition(f, card, app);
+            }
+        }
     }
     draw_status(f, rows[2], app);
 }
@@ -1325,8 +1349,354 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     } else if app.selected_calc().is_some() {
         format!("  ⏎ copy answer · ^y copy · ↑↓ results · {esc}")
     } else {
-        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh · {esc}")
+        let dict = if app.definition().is_some() { " · ^l dictionary" } else { "" };
+        format!("  ⏎ open · ^r reveal · ^y copy · ^v look · ⇥ search/scope · ^x refresh{dict} · {esc}")
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary card: the definition of a one-word query, like Spotlight's.
+
+/// Wait this long for the next keystroke before looking a word up.
+const DEFINE_DEBOUNCE: Duration = Duration::from_millis(100);
+/// Nerd Font book, for the definition card's title.
+const DICT_GLYPH: &str = "\u{f02d}";
+
+/// Dictionary lookups for the query, on a worker thread so typing never waits
+/// (a lookup takes a few ms, the first one in a process 100–250 ms).
+struct DictLookup {
+    tx: mpsc::Sender<String>,
+    rx: mpsc::Receiver<(String, Option<Definition>)>,
+    /// The word the query asks to define.
+    word: Option<String>,
+    /// Its entry, once the lookup has landed.
+    entry: Option<Definition>,
+}
+
+impl DictLookup {
+    fn spawn() -> DictLookup {
+        let (tx, requests) = mpsc::channel::<String>();
+        let (results, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Load the dictionary before the first word arrives.
+            define::warm_up();
+            while let Ok(mut word) = requests.recv() {
+                // Latest query wins: wait out the typing and look up only the newest word.
+                loop {
+                    match requests.recv_timeout(DEFINE_DEBOUNCE) {
+                        Ok(w) => word = w,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                let entry = define::define(&word);
+                if results.send((word, entry)).is_err() {
+                    return;
+                }
+            }
+        });
+        DictLookup {
+            tx,
+            rx,
+            word: None,
+            entry: None,
+        }
+    }
+
+    /// The query now asks for `word` (or for nothing): answer from the cache,
+    /// else ask the worker.
+    fn want(&mut self, word: Option<&str>) {
+        if self.word.as_deref() == word {
+            return;
+        }
+        self.word = word.map(str::to_string);
+        self.entry = None;
+        if let Some(w) = word {
+            match define::cached(w) {
+                Some(hit) => self.entry = hit,
+                None => {
+                    let _ = self.tx.send(w.to_string());
+                }
+            }
+        }
+    }
+
+    /// Take finished lookups; answers for words no longer asked for are dropped.
+    fn poll(&mut self) {
+        while let Ok((word, entry)) = self.rx.try_recv() {
+            if self.word.as_deref() == Some(word.as_str()) {
+                self.entry = entry;
+            }
+        }
+    }
+}
+
+impl App {
+    /// The dictionary entry to show for the query, if any.
+    fn definition(&self) -> Option<&Definition> {
+        if self.app_search.is_some() || self.input.trim().is_empty() {
+            return None;
+        }
+        self.dict.entry.as_ref()
+    }
+
+    /// `^l`: show the word in Dictionary.app.
+    fn open_definition(&mut self) {
+        let Some(word) = self.definition().map(|d| d.headword.clone()) else {
+            self.flash("no dictionary entry for the query");
+            return;
+        };
+        match define::open_in_dictionary(&word) {
+            // Dictionary has the focus now, like after ⏎.
+            Ok(()) => self.dismiss(false),
+            Err(e) => self.flash(format!("Dictionary: {e}")),
+        }
+    }
+}
+
+/// No index hits for a word: the card takes the place of "no matches".
+fn definition_replaces_results(app: &App) -> bool {
+    app.definition().is_some() && app.hits.is_empty() && app.calc.is_none() && !app.loading()
+}
+
+/// Rows the card needs to show all of `d` in a card `width` columns wide.
+fn definition_height(d: &Definition, width: u16) -> u16 {
+    let width = width.saturating_sub(4) as usize;
+    let lines = definition_lines(d, width, 3).len() + origin_lines(d, width).len() + 1;
+    lines.min(u16::MAX as usize - 2) as u16 + 2
+}
+
+/// No index hits: the card where the results were, as tall as it needs, and
+/// the "no matches" note below it when there is room.
+fn draw_definition_without_hits(f: &mut Frame, area: Rect, app: &App) {
+    let need = app.definition().map(|d| definition_height(d, area.width)).unwrap_or(0);
+    if area.height < need + 8 {
+        draw_definition(f, area, app);
+        return;
+    }
+    draw_definition(f, Rect::new(area.x, area.y, area.width, need), app);
+    draw_empty(f, Rect::new(area.x, area.y + need, area.width, area.height - need), app);
+}
+
+/// Split `area` into what was there and, below it, the definition card: as
+/// tall as the entry needs, at most `pct`% of `area`, leaving `keep` rows.
+fn split_for_definition(area: Rect, app: &App, pct: u16, keep: u16) -> (Rect, Option<Rect>) {
+    let Some(d) = app.definition() else {
+        return (area, None);
+    };
+    let cap = (area.height * pct / 100).min(area.height.saturating_sub(keep));
+    let h = definition_height(d, area.width).min(cap);
+    if h < 5 {
+        return (area, None);
+    }
+    let top = Rect::new(area.x, area.y, area.width, area.height - h);
+    let card = Rect::new(area.x, area.y + area.height - h, area.width, h);
+    (top, Some(card))
+}
+
+fn draw_definition(f: &mut Frame, area: Rect, app: &App) {
+    let Some(d) = app.definition() else {
+        return;
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {DICT_GLYPH} definition "))
+        .title_bottom(
+            Line::from(vec![
+                Span::styled(" ^l", Style::default().fg(Color::Cyan)),
+                Span::styled(" open in Dictionary ", dim),
+            ])
+            .right_aligned(),
+        )
+        .border_style(dim)
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines = fit_definition(d, inner.width as usize, inner.height as usize);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The most detailed rendering of `d` that fits `height` rows, with the origin
+/// when there is room; cut with an ellipsis when even the plainest does not fit.
+fn fit_definition(d: &Definition, width: usize, height: usize) -> Vec<Line<'static>> {
+    if width < 8 || height == 0 {
+        return Vec::new();
+    }
+    for level in (0..=3).rev() {
+        let mut lines = definition_lines(d, width, level);
+        if lines.len() <= height {
+            let origin = origin_lines(d, width);
+            if !origin.is_empty() && lines.len() + 1 + origin.len() <= height {
+                lines.push(Line::from(""));
+                lines.extend(origin);
+            }
+            return lines;
+        }
+    }
+    let mut lines = definition_lines(d, width, 1);
+    lines.truncate(height);
+    if let Some(last) = lines.pop() {
+        lines.push(ellipsize_line(last, width));
+    }
+    lines
+}
+
+/// `d` as card lines, `width` columns wide. Detail `level`: 3 = senses,
+/// subsenses and an example each; 2 = subsenses without examples; 1 = senses
+/// with an example; 0 = senses only.
+fn definition_lines(d: &Definition, width: usize, level: u8) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut out = Vec::new();
+    let mut head = vec![(d.headword.clone(), Style::default().add_modifier(Modifier::BOLD))];
+    if let Some(p) = &d.pronunciation {
+        head.push((format!("  /{p}/"), dim));
+    }
+    if let Some(n) = &d.note {
+        head.push((format!("  {n}"), dim));
+    }
+    out.extend(wrap_styled(Vec::new(), &head, width, 2));
+    for part in &d.parts {
+        if level >= 2 {
+            out.push(Line::from(""));
+        }
+        let mut pos = Vec::new();
+        if let Some(name) = &part.name {
+            pos.push((
+                name.clone(),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC),
+            ));
+        }
+        if let Some(n) = &part.note {
+            let sep = if pos.is_empty() { "" } else { "  " };
+            pos.push((format!("{sep}{n}"), dim));
+        }
+        if !pos.is_empty() {
+            out.extend(wrap_styled(Vec::new(), &pos, width, 2));
+        }
+        let numbered = part.senses.len() > 1;
+        for (i, s) in part.senses.iter().enumerate() {
+            let (prefix, indent) = if numbered {
+                let n = format!("{} ", i + 1);
+                let w = n.len();
+                (vec![Span::styled(n, Style::default().fg(Color::Cyan))], w)
+            } else {
+                (Vec::new(), 0)
+            };
+            out.extend(wrap_styled(prefix, &sense_segments(s, level >= 1), width, indent));
+            if level >= 2 {
+                for sub in &s.subsenses {
+                    let prefix = vec![Span::raw(" ".repeat(indent)), Span::styled("• ", dim)];
+                    out.extend(wrap_styled(prefix, &sense_segments(sub, level >= 3), width, indent + 2));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn origin_lines(d: &Definition, width: usize) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    match &d.origin {
+        Some(o) => wrap_styled(
+            vec![Span::styled("origin ", dim.add_modifier(Modifier::BOLD))],
+            &[(o.clone(), dim)],
+            width,
+            0,
+        ),
+        None => Vec::new(),
+    }
+}
+
+/// A sense's text, then (optionally) its first example, dimmed.
+fn sense_segments(s: &Sense, example: bool) -> Vec<(String, Style)> {
+    let mut segs = vec![(s.text.clone(), Style::default())];
+    if example {
+        if let Some(e) = s.examples.first() {
+            // `[with object] : she ran the bath`: the grammar label is noise here.
+            let e = match e.find("] : ") {
+                Some(i) if e.starts_with('[') => &e[i + 4..],
+                _ => e.as_str(),
+            };
+            let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC);
+            segs.push((": ".into(), Style::default()));
+            segs.push((e.to_string(), style));
+        }
+    }
+    segs
+}
+
+/// Word-wrap styled text into lines of at most `width` columns. The first line
+/// starts with `prefix`; the others are indented by `indent` columns.
+fn wrap_styled(
+    prefix: Vec<Span<'static>>,
+    segments: &[(String, Style)],
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
+    let indent = indent.min(width / 2);
+    let mut lines = Vec::new();
+    let mut used: usize = prefix.iter().map(|s| s.width()).sum();
+    let mut line_start = used;
+    let mut cur = prefix;
+    for (text, style) in segments {
+        for atom in text.split_inclusive(' ') {
+            let mut atom = atom.to_string();
+            loop {
+                let w = Span::raw(atom.trim_end()).width();
+                if used + w <= width {
+                    used += Span::raw(atom.as_str()).width();
+                    cur.push(Span::styled(atom, *style));
+                    break;
+                }
+                if used > line_start {
+                    // Start a new line, then retry the word there.
+                    lines.push(Line::from(std::mem::take(&mut cur)));
+                    cur.push(Span::raw(" ".repeat(indent)));
+                    used = indent;
+                    line_start = indent;
+                    atom = atom.trim_start().to_string();
+                    continue;
+                }
+                // Longer than a whole line: hard-split it.
+                let room = width.saturating_sub(used).max(1);
+                let head: String = atom.chars().take(room).collect();
+                let rest: String = atom.chars().skip(room).collect();
+                cur.push(Span::styled(head, *style));
+                used = width;
+                if rest.is_empty() {
+                    break;
+                }
+                atom = rest;
+            }
+        }
+    }
+    if cur.iter().any(|s| !s.content.trim().is_empty()) {
+        lines.push(Line::from(cur));
+    }
+    lines
+}
+
+/// Cut `line` to `width` columns and end it with an ellipsis.
+fn ellipsize_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = line.spans;
+    let total = |spans: &Vec<Span<'static>>| spans.iter().map(|s| s.width()).sum::<usize>();
+    while total(&spans) + 2 > width {
+        let Some(last) = spans.pop() else {
+            break;
+        };
+        let mut text = last.content.into_owned();
+        text.pop();
+        if !text.is_empty() {
+            spans.push(Span::styled(text, last.style));
+        }
+    }
+    if let Some(last) = spans.pop() {
+        let text = last.content.trim_end().to_string();
+        spans.push(Span::styled(text, last.style));
+    }
+    spans.push(Span::styled(" …", Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
 }

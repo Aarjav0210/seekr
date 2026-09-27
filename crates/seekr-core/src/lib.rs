@@ -10,11 +10,13 @@
 //! - [`app_search::AppSearch`]: "Tab to search" — hand the query to Arc, Spotify, …
 //! - [`calc`]: the calculator (`2+2*3`, `sqrt(2)`, `15% of 80`).
 //! - [`doctor`]: diagnostics for Spotlight and our own index.
+//! - [`define`]: dictionary definitions from the macOS system dictionary.
 
 pub mod actions;
 pub mod app_search;
 pub mod calc;
 pub mod config;
+pub mod define;
 pub mod doctor;
 pub mod index;
 pub mod indexer;
@@ -26,6 +28,7 @@ pub mod search;
 pub use app_search::AppSearch;
 pub use calc::Calculation;
 pub use config::Config;
+pub use define::Definition;
 pub use index::{Index, Usage};
 pub use item::{Item, Kind};
 pub use query::Query;

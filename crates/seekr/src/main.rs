@@ -85,6 +85,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Define a word with the macOS dictionary (offline). Exits non-zero when there is no entry.
+    Define {
+        word: String,
+        /// Emit JSON: headword, pronunciation, parts of speech with senses, origin, raw text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Search inside an app: `seekr search-in spotify daft punk`. Without terms, opens the app.
     SearchIn {
         /// Keyword of the search; `seekr searches` lists them.
@@ -127,6 +134,7 @@ fn main() -> Result<()> {
         Some(Cmd::Doctor { json }) => cli::doctor(json),
         Some(Cmd::Kinds { json }) => cli::kinds(json),
         Some(Cmd::Searches { json }) => cli::searches(json),
+        Some(Cmd::Define { word, json }) => cli::define(&word, json),
         Some(Cmd::SearchIn {
             keyword,
             terms,
