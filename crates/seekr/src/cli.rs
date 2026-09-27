@@ -139,9 +139,10 @@ pub fn index(full: bool, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "apps: {}  (+{} from LaunchServices)\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
+            "apps: {}  (+{} from LaunchServices)\nplaces: {}\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
             report.apps,
             report.lsregister_apps,
+            report.places,
             report.files,
             report.folders,
             report.walk_errors,

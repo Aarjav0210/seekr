@@ -155,9 +155,16 @@ stay visible in that session until the next launch.
 
 ## Ranking
 
-fuzzy score × kind boost × depth penalty × repo penalty + frecency.
+fuzzy score × kind boost (× place / exact-app boost) × depth penalty × repo penalty + frecency.
 
-Apps outrank files of the same name. Deeply nested paths and anything inside a
+Apps outrank files of the same name. The well-known folders (your home folder,
+Desktop, Documents, Downloads, Pictures, Movies, Music, Public, Library, iCloud
+Drive, Trash, `/Applications`, `/Applications/Utilities`, `~/Applications`) and
+the configured roots are indexed as folders of their own, without walking into
+the ones that are not roots. Typing the start of one's name (`downl`, `desk`,
+`icloud`, `home`) makes it the top hit, above apps that merely contain the word;
+an app named exactly what you typed still comes first (`music`: Music, then
+`~/Music`). Deeply nested paths and anything inside a
 git checkout are pushed down unless you scope to `code:`. Every open through
 seekr is logged, so things you use often float up. Python virtualenvs,
 `node_modules`, build output and similar noise are never indexed.
@@ -165,7 +172,7 @@ seekr is logged, so things you use often float up. Python virtualenvs,
 ## Layout
 
 ```
-crates/seekr-core   library, no UI: items, query parser, providers (apps, files),
+crates/seekr-core   library, no UI: items, query parser, providers (apps, places, files),
                     SQLite index + usage log, nucleo matcher + re-ranking,
                     actions (open/reveal/copy/quick-look), app searches (⇥), doctor
 crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)

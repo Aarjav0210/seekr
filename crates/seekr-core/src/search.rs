@@ -32,6 +32,16 @@ pub struct Searcher {
     col0: String,
 }
 
+/// Weight on a well-known folder (see [`Item::is_place`]) whose name starts
+/// with the query, lifting it above apps that merely contain the word:
+/// `desk` puts ~/Desktop before GitHub Desktop.
+const PLACE_BOOST: f32 = 1.5;
+/// Weight on an app named exactly what was typed, keeping it ahead of a
+/// same-named place: `music` puts Music.app first, then ~/Music.
+const EXACT_APP_BOOST: f32 = 1.2;
+/// Shortest query that counts as naming a place.
+const PLACE_MIN_PREFIX: usize = 2;
+
 fn fill(item: &Item, cols: &mut [Utf32String]) {
     cols[0] = Utf32String::from(item.search_text().as_str());
     cols[1] = Utf32String::from(item.kind.as_str());
@@ -193,6 +203,8 @@ impl Searcher {
         let k = (limit * 5).clamp(200, 1000).min(n as usize) as u32;
         let pattern = snap.pattern().column_pattern(0);
         let scoped = query.scope.is_some();
+        let terms = query.terms.trim().to_lowercase();
+        let names_place = terms.chars().count() >= PLACE_MIN_PREFIX;
         let mut indices = Vec::new();
         let mut hits: Vec<Hit> = snap
             .matched_items(0..k)
@@ -206,7 +218,15 @@ impl Searcher {
                 indices.sort_unstable();
                 indices.dedup();
                 let idx: Vec<u32> = indices.iter().copied().filter(|&i| i < name_len).collect();
-                let kind_mult = if scoped { 1.0 } else { it.data.kind.base_boost() };
+                let mut kind_mult = if scoped { 1.0 } else { it.data.kind.base_boost() };
+                let names_this_place = names_place
+                    && it.data.is_place()
+                    && name_matches(&it.data, |n| n.starts_with(&terms));
+                if names_this_place {
+                    kind_mult *= PLACE_BOOST;
+                } else if it.data.kind == Kind::App && name_matches(&it.data, |n| n == terms) {
+                    kind_mult *= EXACT_APP_BOOST;
+                }
                 let depth_pen = 1.0 - 0.015 * (it.data.depth().saturating_sub(3).min(10) as f32);
                 // Source trees are noise unless you asked for code.
                 let repo_pen = if it.data.in_repo() && query.scope != Some(Kind::Code) {
@@ -232,6 +252,12 @@ impl Searcher {
         hits.truncate(limit);
         hits
     }
+}
+
+/// Whether the item's name or alt name, lowercased, satisfies `pred`.
+fn name_matches(item: &Item, pred: impl Fn(&str) -> bool) -> bool {
+    pred(&item.name.to_lowercase())
+        || item.alt.as_ref().is_some_and(|a| pred(&a.to_lowercase()))
 }
 
 /// Frecency bonus: more uses and more recent uses score higher. Capped so a
@@ -290,6 +316,81 @@ mod tests {
         s.set_query(Query::parse(raw));
         settle(s);
         s.results(10).into_iter().map(|h| h.item.name).collect()
+    }
+
+    fn place(name: &str, path: &str) -> Item {
+        let mut it = Item::new(Kind::Folder, name, path);
+        it.flags = crate::item::FLAG_PLACE;
+        it
+    }
+
+    /// A realistic mix: places, apps whose names contain or equal a place's
+    /// name, and files and folders that merely mention it.
+    fn searcher_with_places() -> Searcher {
+        let s = Searcher::new(HashMap::new(), Vec::new());
+        for app in ["GitHub Desktop", "Neo4j Desktop", "Music", "Safari", "Notes"] {
+            s.push(Item::new(Kind::App, app, format!("/Applications/{app}.app")));
+        }
+        let mut home = place("jdoe", "/Users/jdoe");
+        home.alt = Some("Home".into());
+        s.push(home);
+        s.push(place("Desktop", "/Users/jdoe/Desktop"));
+        s.push(place("Downloads", "/Users/jdoe/Downloads"));
+        s.push(place("Music", "/Users/jdoe/Music"));
+        s.push(place("Applications", "/Applications"));
+        s.push(place("iCloud Drive", "/Users/jdoe/Library/Mobile Documents/com~apple~CloudDocs"));
+        for (kind, name, path) in [
+            (Kind::Video, "TV Static [DOWNLOAD LINK].mp4", "/Users/jdoe/Downloads/TV Static [DOWNLOAD LINK].mp4"),
+            (Kind::Doc, "Downloads checklist.pdf", "/Users/jdoe/Documents/Downloads checklist.pdf"),
+            (Kind::Folder, "Downloads", "/Users/jdoe/Documents/old/Downloads"),
+            (Kind::Folder, "Desktop Backup", "/Users/jdoe/Documents/Desktop Backup"),
+            (Kind::Folder, "Music", "/Users/jdoe/Music/Music"),
+            (Kind::Doc, "Safari notes.md", "/Users/jdoe/Documents/Safari notes.md"),
+        ] {
+            s.push(Item::new(kind, name, path));
+        }
+        s
+    }
+
+    fn top(s: &mut Searcher, raw: &str, n: usize) -> Vec<String> {
+        s.set_query(Query::parse(raw));
+        settle(s);
+        s.results(n)
+            .into_iter()
+            .map(|h| format!("{} {}", h.item.kind.as_str(), h.item.path.display()))
+            .collect()
+    }
+
+    #[test]
+    fn a_named_place_is_the_top_hit() {
+        let mut s = searcher_with_places();
+        for q in ["downloads", "Downl", "DOWNLOADS"] {
+            assert_eq!(top(&mut s, q, 1), ["folder /Users/jdoe/Downloads"], "{q}");
+        }
+        assert_eq!(top(&mut s, "desk", 1), ["folder /Users/jdoe/Desktop"]);
+        assert_eq!(top(&mut s, "icloud", 1), ["folder /Users/jdoe/Library/Mobile Documents/com~apple~CloudDocs"]);
+        assert_eq!(top(&mut s, "applications", 1), ["folder /Applications"]);
+        assert_eq!(top(&mut s, "home", 1), ["folder /Users/jdoe"]);
+        assert_eq!(top(&mut s, "jdoe", 1), ["folder /Users/jdoe"]);
+        assert_eq!(top(&mut s, "dir: desk", 1), ["folder /Users/jdoe/Desktop"]);
+    }
+
+    #[test]
+    fn apps_named_exactly_still_come_first() {
+        let mut s = searcher_with_places();
+        assert_eq!(
+            top(&mut s, "music", 2),
+            ["app /Applications/Music.app", "folder /Users/jdoe/Music"]
+        );
+        assert_eq!(top(&mut s, "safari", 1), ["app /Applications/Safari.app"]);
+        assert_eq!(top(&mut s, "notes", 1), ["app /Applications/Notes.app"]);
+    }
+
+    #[test]
+    fn a_single_letter_does_not_name_a_place() {
+        let mut s = searcher_with_places();
+        assert_ne!(top(&mut s, "d", 1), ["folder /Users/jdoe/Desktop"]);
+        assert_ne!(top(&mut s, "d", 1), ["folder /Users/jdoe/Downloads"]);
     }
 
     #[test]

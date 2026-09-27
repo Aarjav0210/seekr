@@ -169,13 +169,17 @@ impl Index {
         Ok(())
     }
 
-    /// `path -> (modified, size)` for every indexed item; the basis for incremental refresh.
-    pub fn load_fingerprints(&self) -> Result<HashMap<PathBuf, (i64, u64)>> {
-        let mut stmt = self.conn.prepare("SELECT path, modified, size FROM items")?;
+    /// `path -> (modified, size, flags)` for every indexed item; the basis for incremental refresh.
+    pub fn load_fingerprints(&self) -> Result<HashMap<PathBuf, (i64, u64, u32)>> {
+        let mut stmt = self.conn.prepare("SELECT path, modified, size, flags FROM items")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 PathBuf::from(r.get::<_, String>(0)?),
-                (r.get::<_, i64>(1)?, r.get::<_, i64>(2)? as u64),
+                (
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)? as u64,
+                    r.get::<_, i64>(3)? as u32,
+                ),
             ))
         })?;
         let mut m = HashMap::new();

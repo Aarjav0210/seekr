@@ -212,6 +212,9 @@ fn is_zero(v: &u32) -> bool {
 
 /// The item lives inside a git repository (source tree noise for most searches).
 pub const FLAG_IN_REPO: u32 = 1 << 0;
+/// A well-known location (`~/Downloads`, `/Applications`, a configured root, …)
+/// that people search for by name. See [`crate::providers::places`].
+pub const FLAG_PLACE: u32 = 1 << 1;
 
 impl Item {
     pub fn new(kind: Kind, name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
@@ -229,6 +232,10 @@ impl Item {
 
     pub fn in_repo(&self) -> bool {
         self.flags & FLAG_IN_REPO != 0
+    }
+
+    pub fn is_place(&self) -> bool {
+        self.flags & FLAG_PLACE != 0
     }
 
     /// Text the fuzzy matcher sees for the primary column: name plus alt name.
