@@ -71,6 +71,7 @@ seekr search --fresh invoice       # refresh the index, then search
 seekr open ~/Downloads/x.pdf       # open (records usage for ranking)
 seekr search-in spotify daft punk  # hand a query to an app (⇥ in the finder)
 seekr searches                     # the apps ⇥ can search in
+seekr define serendipity [--json]  # the macOS dictionary's entry (exit 1: none)
 seekr refresh                      # pick up new, changed and deleted files
 seekr index [--full]               # rebuild; --full also asks LaunchServices
 seekr doctor                       # Spotlight health + index stats
@@ -105,6 +106,7 @@ you actually launch.
 | `^v`         | Quick Look                                    |
 | `⇥`          | on Arc or Spotify: search inside the app; otherwise cycle scope: none → app → doc → dir |
 | `^x`         | refresh the index                             |
+| `^l`         | open the definition card's word in Dictionary.app |
 | `esc`        | clear the query; on an empty query, quit (launcher: hide) |
 | `^u` / `^w`  | clear the query / delete the last word        |
 | `^c`         | quit, also in the launcher                    |
@@ -142,6 +144,24 @@ Notes, …) cannot be added this way. `seekr searches` lists the configured
 searches and whether their apps are installed; `seekr search-in spotify daft
 punk` runs one from the shell, and `--print --json` shows what it would open.
 
+### Definitions
+
+Type a single English word and a definition card appears, like Spotlight's:
+headword, pronunciation, senses by part of speech, and the origin when there
+is room. It sits under the details pane (under the results in narrow
+windows), or where the results would be when nothing in the index matches.
+`^l` opens the word in Dictionary.app; `⏎` still opens the selected result.
+
+The entry comes from macOS's own dictionary (DictionaryServices, the Oxford
+Dictionary of English by default), offline, looked up on a background thread
+about 100 ms after you stop typing. Only bare words are looked up (letters,
+inner `-` or `'`, two or more): not scoped queries (`app: notes`), filters,
+app searches or file names. Inflections resolve to their entry (`notes` →
+note, `went` → go); names that are not words (`spotify`) get no card. macOS
+downloads its dictionaries the first time anything asks for one, so the very
+first lookup on a fresh machine can come back empty. `seekr define <word>
+--json` prints the parsed entry (and the raw text) for scripts and agents.
+
 ## Freshness
 
 Apps are rescanned live on every start. Files come from the index, which is
@@ -167,7 +187,8 @@ seekr is logged, so things you use often float up. Python virtualenvs,
 ```
 crates/seekr-core   library, no UI: items, query parser, providers (apps, files),
                     SQLite index + usage log, nucleo matcher + re-ranking,
-                    actions (open/reveal/copy/quick-look), app searches (⇥), doctor
+                    actions (open/reveal/copy/quick-look), app searches (⇥),
+                    definitions (macOS dictionary), doctor
 crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)
 contrib/            Cmd+Space launcher (Hammerspoon config, kitty config)
 ```
