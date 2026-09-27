@@ -1,5 +1,5 @@
 use crate::app_search::{self, AppSearch};
-use crate::item::Kind;
+use crate::item::{Item, Kind};
 use serde::{Deserialize, Serialize};
 
 /// A parsed search query.
@@ -114,6 +114,19 @@ impl Query {
             && self.app_search.is_none()
     }
 
+    /// Whether `item` passes the scope, `in:` and `ext:` filters, ignoring the
+    /// terms; case-insensitive, like the matcher.
+    pub fn matches_filters(&self, item: &Item) -> bool {
+        self.scope.is_none_or(|k| k == item.kind)
+            && self.in_dir.as_ref().is_none_or(|d| {
+                item.path_display().to_lowercase().contains(&d.to_lowercase())
+            })
+            && self
+                .ext
+                .as_ref()
+                .is_none_or(|e| item.name.to_lowercase().ends_with(&format!(".{e}")))
+    }
+
     /// Human readable description of active filters, for status lines.
     pub fn describe_filters(&self) -> String {
         let mut parts = Vec::new();
@@ -170,6 +183,25 @@ mod tests {
         assert_eq!(q.terms, "offer");
         assert_eq!(q.in_dir.as_deref(), Some("Downloads"));
         assert_eq!(q.ext.as_deref(), Some("pdf"));
+    }
+
+    #[test]
+    fn filters_apply_to_items() {
+        let pdf = Item::new(Kind::Doc, "Offer.PDF", "/x/Downloads/Offer.PDF");
+        let app = Item::new(Kind::App, "Arc", "/Applications/Arc.app");
+        for (raw, pdf_ok, app_ok) in [
+            ("offer", true, true),
+            ("doc:", true, false),
+            ("is:app", false, true),
+            ("in:downloads", true, false),
+            ("path:~/Downloads", true, false),
+            ("ext:pdf", true, false),
+            ("type:.app", false, false),
+            ("doc: in:Downloads ext:pdf", true, false),
+        ] {
+            let q = Query::parse(raw);
+            assert_eq!((q.matches_filters(&pdf), q.matches_filters(&app)), (pdf_ok, app_ok), "{raw}");
+        }
     }
 
     #[test]

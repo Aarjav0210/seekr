@@ -2,7 +2,7 @@
 use crate::config::Config;
 use crate::item::{Item, Kind};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -102,25 +102,7 @@ impl Index {
     pub fn replace_items(&mut self, source: &str, items: &[Item]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM items WHERE source = ?1", params![source])?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO items (path, kind, name, alt, bundle_id, size, modified, flags, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            for it in items {
-                stmt.execute(params![
-                    it.path.to_string_lossy(),
-                    it.kind.as_str(),
-                    it.name,
-                    it.alt,
-                    it.bundle_id,
-                    it.size as i64,
-                    it.modified,
-                    it.flags as i64,
-                    source,
-                ])?;
-            }
-        }
+        insert_items(&tx, source, items)?;
         tx.commit()?;
         Ok(())
     }
@@ -131,25 +113,7 @@ impl Index {
             return Ok(());
         }
         let tx = self.conn.transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT OR REPLACE INTO items (path, kind, name, alt, bundle_id, size, modified, flags, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            for it in items {
-                stmt.execute(params![
-                    it.path.to_string_lossy(),
-                    it.kind.as_str(),
-                    it.name,
-                    it.alt,
-                    it.bundle_id,
-                    it.size as i64,
-                    it.modified,
-                    it.flags as i64,
-                    source,
-                ])?;
-            }
-        }
+        insert_items(&tx, source, items)?;
         tx.commit()?;
         Ok(())
     }
@@ -182,47 +146,20 @@ impl Index {
                 ),
             ))
         })?;
-        let mut m = HashMap::new();
-        for r in rows {
-            let (p, fp) = r?;
-            m.insert(p, fp);
-        }
-        Ok(m)
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Load items. `kinds` of `None` loads everything; otherwise only those kinds.
     pub fn load_items(&self, kinds: Option<&[Kind]>) -> Result<Vec<Item>> {
-        let sql = match kinds {
-            None => "SELECT path, kind, name, alt, bundle_id, size, modified, flags FROM items".to_string(),
-            Some(ks) => {
-                let list = ks
-                    .iter()
-                    .map(|k| format!("'{}'", k.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "SELECT path, kind, name, alt, bundle_id, size, modified, flags FROM items WHERE kind IN ({list})"
-                )
-            }
-        };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Item {
-                path: PathBuf::from(r.get::<_, String>(0)?),
-                kind: Kind::from_db(&r.get::<_, String>(1)?),
-                name: r.get(2)?,
-                alt: r.get(3)?,
-                bundle_id: r.get(4)?,
-                size: r.get::<_, i64>(5)? as u64,
-                modified: r.get(6)?,
-                flags: r.get::<_, i64>(7)? as u32,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        let mut sql = format!("SELECT {ITEM_COLUMNS} FROM items i");
+        let names: Vec<&str> = kinds.unwrap_or_default().iter().map(|k| k.as_str()).collect();
+        if kinds.is_some() {
+            let marks = vec!["?"; names.len()].join(",");
+            sql.push_str(&format!(" WHERE i.kind IN ({marks})"));
         }
-        Ok(out)
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(&names), item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn count(&self) -> Result<usize> {
@@ -236,76 +173,31 @@ impl Index {
         let mut stmt = self
             .conn
             .prepare("SELECT path, count, last_used FROM usage")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                PathBuf::from(r.get::<_, String>(0)?),
-                Usage {
-                    count: r.get::<_, i64>(1)? as u32,
-                    last_used: r.get(2)?,
-                },
-            ))
-        })?;
-        let mut m = HashMap::new();
-        for r in rows {
-            let (p, u) = r?;
-            m.insert(p, u);
-        }
-        Ok(m)
+        let rows = stmt.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), usage_at(r, 1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Items that have been used, most relevant first (for the empty-query view).
+    /// Items that have been used, most recent first (for the empty-query view).
     pub fn recent_items(&self, limit: usize) -> Result<Vec<(Item, Usage)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT i.path, i.kind, i.name, i.alt, i.bundle_id, i.size, i.modified, i.flags, u.count, u.last_used
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS}, u.count, u.last_used
              FROM usage u JOIN items i ON i.path = u.path
-             ORDER BY u.last_used DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |r| {
-            Ok((
-                Item {
-                    path: PathBuf::from(r.get::<_, String>(0)?),
-                    kind: Kind::from_db(&r.get::<_, String>(1)?),
-                    name: r.get(2)?,
-                    alt: r.get(3)?,
-                    bundle_id: r.get(4)?,
-                    size: r.get::<_, i64>(5)? as u64,
-                    modified: r.get(6)?,
-                    flags: r.get::<_, i64>(7)? as u32,
-                },
-                Usage {
-                    count: r.get::<_, i64>(8)? as u32,
-                    last_used: r.get(9)?,
-                },
-            ))
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+             ORDER BY u.last_used DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], |r| Ok((item_from_row(r)?, usage_at(r, 8)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Count one more use of `path`, now; returns its updated usage.
     pub fn record_use(&self, path: &Path) -> Result<Usage> {
-        let now = crate::now_secs();
-        self.conn.execute(
+        let usage = self.conn.query_row(
             "INSERT INTO usage (path, count, last_used) VALUES (?1, 1, ?2)
-             ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = excluded.last_used",
-            params![path.to_string_lossy(), now],
+             ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = excluded.last_used
+             RETURNING count, last_used",
+            params![path.to_string_lossy(), crate::now_secs()],
+            |r| usage_at(r, 0),
         )?;
-        let u = self
-            .conn
-            .query_row(
-                "SELECT count, last_used FROM usage WHERE path = ?1",
-                params![path.to_string_lossy()],
-                |r| {
-                    Ok(Usage {
-                        count: r.get::<_, i64>(0)? as u32,
-                        last_used: r.get(1)?,
-                    })
-                },
-            )
-            .unwrap_or_default();
-        Ok(u)
+        Ok(usage)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -338,30 +230,136 @@ impl Index {
     }
 
     pub fn stats(&self) -> Result<Stats> {
-        let mut by_kind = Vec::new();
         let mut stmt = self
             .conn
             .prepare("SELECT kind, COUNT(*) FROM items GROUP BY kind ORDER BY COUNT(*) DESC")?;
         let rows = stmt.query_map([], |r| {
             Ok((Kind::from_db(&r.get::<_, String>(0)?), r.get::<_, i64>(1)? as usize))
         })?;
-        let mut total = 0;
-        for r in rows {
-            let (k, n) = r?;
-            total += n;
-            by_kind.push((k, n));
-        }
+        let by_kind: Vec<(Kind, usize)> = rows.collect::<rusqlite::Result<_>>()?;
         let usage_entries: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM usage", [], |r| r.get(0))?;
         let db_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         Ok(Stats {
-            total,
+            total: by_kind.iter().map(|(_, n)| n).sum(),
             by_kind,
             last_indexed: self.last_indexed(),
             usage_entries: usage_entries as usize,
             db_path: self.path.clone(),
             db_bytes,
         })
+    }
+}
+
+/// What [`item_from_row`] reads, in order, from the items table aliased `i`.
+const ITEM_COLUMNS: &str = "i.path, i.kind, i.name, i.alt, i.bundle_id, i.size, i.modified, i.flags";
+
+fn item_from_row(r: &Row) -> rusqlite::Result<Item> {
+    Ok(Item {
+        path: PathBuf::from(r.get::<_, String>(0)?),
+        kind: Kind::from_db(&r.get::<_, String>(1)?),
+        name: r.get(2)?,
+        alt: r.get(3)?,
+        bundle_id: r.get(4)?,
+        size: r.get::<_, i64>(5)? as u64,
+        modified: r.get(6)?,
+        flags: r.get::<_, i64>(7)? as u32,
+    })
+}
+
+/// The `count, last_used` pair starting at column `i`.
+fn usage_at(r: &Row, i: usize) -> rusqlite::Result<Usage> {
+    Ok(Usage {
+        count: r.get::<_, i64>(i)? as u32,
+        last_used: r.get(i + 1)?,
+    })
+}
+
+fn insert_items(tx: &Transaction, source: &str, items: &[Item]) -> Result<()> {
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR REPLACE INTO items (path, kind, name, alt, bundle_id, size, modified, flags, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    for it in items {
+        stmt.execute(params![
+            it.path.to_string_lossy(),
+            it.kind.as_str(),
+            it.name,
+            it.alt,
+            it.bundle_id,
+            it.size as i64,
+            it.modified,
+            it.flags as i64,
+            source,
+        ])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::temp_dir;
+
+    fn item(kind: Kind, path: &str) -> Item {
+        let mut it = Item::new(kind, path.rsplit('/').next().unwrap(), path);
+        it.alt = Some("alt".into());
+        it.bundle_id = Some("com.example".into());
+        it.size = 42;
+        it.modified = 1_700_000_000;
+        it.flags = crate::item::FLAG_IN_REPO;
+        it
+    }
+
+    #[test]
+    fn items_round_trip_and_filter_by_kind() {
+        let tmp = temp_dir("index-items");
+        let mut idx = Index::open(&tmp.join("index.db")).unwrap();
+        let a = item(Kind::App, "/Applications/A.app");
+        let d = item(Kind::Doc, "/x/offer.pdf");
+        idx.replace_items("walk", &[a.clone(), d.clone()]).unwrap();
+        assert_eq!(idx.load_items(None).unwrap().len(), 2);
+        assert_eq!(idx.load_items(Some(&[Kind::Doc])).unwrap(), [d.clone()]);
+        assert_eq!(idx.load_items(Some(&[Kind::Doc, Kind::App])).unwrap().len(), 2);
+        assert!(idx.load_items(Some(&[])).unwrap().is_empty());
+        assert_eq!(idx.stats().unwrap().total, 2);
+
+        // Upserts touch only their items; a replace drops the source's old ones.
+        let mut d2 = d.clone();
+        d2.size = 7;
+        idx.upsert_items("walk", &[d2.clone()]).unwrap();
+        assert_eq!(idx.load_items(Some(&[Kind::Doc])).unwrap(), [d2]);
+        idx.replace_items("walk", &[a.clone()]).unwrap();
+        assert_eq!(idx.load_items(None).unwrap(), [a]);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn uses_are_counted_and_listed_most_recent_first() {
+        let tmp = temp_dir("index-usage");
+        let mut idx = Index::open(&tmp.join("index.db")).unwrap();
+        let a = item(Kind::Doc, "/x/a.pdf");
+        let b = item(Kind::Doc, "/x/b.pdf");
+        idx.replace_items("walk", &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(idx.record_use(&a.path).unwrap().count, 1);
+        let u = idx.record_use(&a.path).unwrap();
+        assert_eq!(u.count, 2);
+        assert!(u.last_used > 0);
+        idx.conn
+            .execute("UPDATE usage SET last_used = 1 WHERE path = ?1", params![a.path.to_string_lossy()])
+            .unwrap();
+        idx.record_use(&b.path).unwrap();
+        // A use of something no longer indexed is kept, but not listed.
+        idx.record_use(Path::new("/gone.txt")).unwrap();
+
+        let recent = idx.recent_items(10).unwrap();
+        let paths: Vec<_> = recent.iter().map(|(i, _)| i.path.clone()).collect();
+        assert_eq!(paths, [b.path.clone(), a.path.clone()]);
+        assert_eq!(recent[1].0, a, "items come back whole");
+        assert_eq!(recent[1].1.count, 2);
+        assert_eq!(idx.load_usage().unwrap().len(), 3);
+        assert_eq!(idx.recent_items(1).unwrap().len(), 1);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

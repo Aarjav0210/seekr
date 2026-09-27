@@ -7,12 +7,11 @@
 //! 2. [`scan_launch_services`] — parses `lsregister -dump` (≈4 s) to catch apps
 //!    registered from unusual locations. Used by `seekr index`.
 use crate::config::Config;
-use crate::item::{Item, Kind};
+use crate::item::{mtime, Item, Kind};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
@@ -25,12 +24,11 @@ pub fn scan_app_dirs(cfg: &Config) -> Vec<Item> {
             push_app(&root, &mut seen, &mut out);
             continue;
         }
-        let walker = walkdir::WalkDir::new(&root)
+        let mut it = walkdir::WalkDir::new(&root)
             .min_depth(1)
             .max_depth(4)
             .follow_links(false)
             .into_iter();
-        let mut it = walker;
         while let Some(entry) = it.next() {
             let Ok(entry) = entry else { continue };
             let p = entry.path();
@@ -41,12 +39,10 @@ pub fn scan_app_dirs(cfg: &Config) -> Vec<Item> {
                 }
                 continue;
             }
-            // Only descend into plain folders (and *.localized wrappers). Skip other packages.
-            if entry.file_type().is_dir() {
-                let name = entry.file_name().to_string_lossy();
-                if name.starts_with('.') {
-                    it.skip_current_dir();
-                }
+            // Other folders (`*.localized` wrappers included) are searched too,
+            // except hidden ones.
+            if entry.file_type().is_dir() && entry.file_name().to_string_lossy().starts_with('.') {
+                it.skip_current_dir();
             }
         }
     }
@@ -106,12 +102,7 @@ pub fn app_item(p: &Path) -> Option<Item> {
     let stem = p.file_stem()?.to_string_lossy().into_owned();
     let mut item = Item::new(Kind::App, stem, p);
     if let Ok(md) = std::fs::metadata(p) {
-        item.modified = md
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        item.modified = mtime(&md);
     }
     let plist_path = p.join("Contents").join("Info.plist");
     if let Ok(plist::Value::Dictionary(dict)) = plist::Value::from_file(&plist_path) {

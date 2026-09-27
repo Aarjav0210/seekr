@@ -1,6 +1,6 @@
 //! Non-interactive subcommands.
 use crate::loader;
-use crate::util::{human_size, relative_time};
+use crate::util::{ellipsize, human_size, relative_time};
 use anyhow::{bail, Result};
 use seekr_core::actions::{self, Action};
 use seekr_core::define::{self, Sense};
@@ -9,21 +9,17 @@ use seekr_core::search::kinds_for_query;
 use seekr_core::{calc, doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Result<()> {
     let cfg = Config::load()?;
     let idx = Index::open_default()?;
     let q = Query::parse(raw);
-    let lazy: Vec<Kind> = Kind::ALL
-        .iter()
-        .copied()
-        .filter(|k| cfg.is_lazy(*k))
-        .collect();
     let kinds = if all {
         Kind::ALL.to_vec()
     } else {
-        kinds_for_query(&q, &lazy)
+        kinds_for_query(&q, &cfg)
     };
     let recent = idx
         .recent_items(50)?
@@ -35,18 +31,7 @@ pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Re
         eprintln!("seekr: {}", r.summary());
     }
     s.set_query(q);
-    // Drive the matcher to completion.
-    let mut spins = 0;
-    loop {
-        let st = s.tick(50);
-        spins += 1;
-        if !st.running && spins > 1 {
-            break;
-        }
-        if spins > 400 {
-            break;
-        }
-    }
+    s.settle(Duration::from_secs(20));
     let hits = s.results(limit);
     if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -62,7 +47,7 @@ pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Re
             "{:>2}. {:<7} {:<40} {}",
             i + 1,
             h.item.kind.as_str(),
-            crate::util::ellipsize(&h.item.name, 40),
+            ellipsize(&h.item.name, 40),
             h.item.path_display()
         );
         if std::env::var_os("SEEKR_DEBUG").is_some() {
@@ -85,21 +70,15 @@ pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Re
 
 pub fn open(path: &Path, reveal: bool) -> Result<()> {
     let idx = Index::open_default()?;
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    // Spelled like the index spells it (absolute, no `./` or trailing `/`),
+    // so the use counts for that item's ranking.
+    let path: PathBuf = std::path::absolute(path)?.components().collect();
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let kind = if path.is_dir() {
-        if path.extension().is_some_and(|e| e == "app") {
-            Kind::App
-        } else {
-            Kind::Folder
-        }
+    let kind = if path.is_dir() && !apps::is_app_bundle(&path) {
+        Kind::Folder
     } else {
         Kind::from_filename(&name)
     };
@@ -115,7 +94,7 @@ pub fn refresh(json: bool) -> Result<()> {
     if idx.count()? == 0 {
         return index(false, json);
     }
-    let apps = seekr_core::providers::apps::scan_app_dirs(&cfg);
+    let apps = apps::scan_app_dirs(&cfg);
     let report = indexer::refresh(&cfg, &mut idx, &apps, |_| {})?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

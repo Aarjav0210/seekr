@@ -4,10 +4,9 @@
 //! The file walk only indexes what is *inside* the roots; this is how the
 //! folders themselves become findable. Places are never walked into.
 use crate::config::Config;
-use crate::item::{expand_tilde, Item, Kind, FLAG_PLACE};
+use crate::item::{expand_tilde, mtime, Item, Kind, FLAG_PLACE};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 /// Standard locations and the name Finder shows for them, when that is not
 /// the folder's own name. `~` is the home folder, named after the user.
@@ -88,12 +87,7 @@ fn place_item(path: &Path, name: Option<&str>, home: &Path) -> Option<Item> {
     }
     item.flags = FLAG_PLACE;
     item.size = md.len();
-    item.modified = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    item.modified = mtime(&md);
     Some(item)
 }
 

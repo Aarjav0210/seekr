@@ -4,6 +4,7 @@ use crate::index::{Index, Usage};
 use crate::item::Item;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -41,16 +42,15 @@ impl Action {
 }
 
 pub fn open(path: &Path) -> Result<()> {
-    run("open", &[path.as_os_str().to_string_lossy().as_ref()])
+    run("open", &[path])
 }
 
 pub fn reveal(path: &Path) -> Result<()> {
-    run("open", &["-R", path.as_os_str().to_string_lossy().as_ref()])
+    run("open", &[OsStr::new("-R"), path.as_os_str()])
 }
 
 pub fn open_parent(path: &Path) -> Result<()> {
-    let parent = path.parent().context("no parent directory")?;
-    run("open", &[parent.as_os_str().to_string_lossy().as_ref()])
+    run("open", &[path.parent().context("no parent directory")?])
 }
 
 pub fn quick_look(path: &Path) -> Result<()> {
@@ -120,17 +120,17 @@ pub fn app_search(search: &AppSearch, terms: &str) -> Result<()> {
     if args.is_empty() {
         bail!("nothing to search for");
     }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     run("open", &args)
 }
 
-fn run(cmd: &str, args: &[&str]) -> Result<()> {
+fn run(cmd: &str, args: &[impl AsRef<OsStr>]) -> Result<()> {
     let out = Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("running {cmd}"))?;
     if !out.status.success() {
+        let args: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
         bail!(
             "{cmd} {} failed: {}",
             args.join(" "),
