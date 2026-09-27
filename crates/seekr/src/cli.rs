@@ -5,8 +5,9 @@ use anyhow::{bail, Result};
 use seekr_core::actions::{self, Action};
 use seekr_core::providers::apps;
 use seekr_core::search::kinds_for_query;
-use seekr_core::{doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
+use seekr_core::{calc, doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Result<()> {
@@ -298,6 +299,25 @@ pub fn search_in(keyword: &str, terms: &str, print: bool, json: bool) -> Result<
             Some(u) => println!("{u}"),
             None => println!("open {}", args.join(" ")),
         }
+    }
+    Ok(())
+}
+
+/// `seekr calc 2+2*3`: print the answer (`8`; with thousands separators on a
+/// terminal, plain when piped), or with `--json` the whole [`calc::Calculation`].
+/// Not a calculation, division by zero and undefined results exit non-zero
+/// (with `--json`, after printing `{"input", "error", "message"}`).
+pub fn calc(expr: &str, json: bool) -> Result<()> {
+    match calc::evaluate(expr) {
+        Ok(c) if json => println!("{}", serde_json::to_string_pretty(&c)?),
+        Ok(c) if std::io::stdout().is_terminal() => println!("{}", c.display),
+        Ok(c) => println!("{}", c.raw),
+        Err(e) if json => {
+            let v = serde_json::json!({ "input": expr, "error": e, "message": e.to_string() });
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            std::process::exit(1);
+        }
+        Err(e) => bail!("{e}: {expr:?}"),
     }
     Ok(())
 }

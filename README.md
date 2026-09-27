@@ -71,6 +71,7 @@ seekr search --fresh invoice       # refresh the index, then search
 seekr open ~/Downloads/x.pdf       # open (records usage for ranking)
 seekr search-in spotify daft punk  # hand a query to an app (⇥ in the finder)
 seekr searches                     # the apps ⇥ can search in
+seekr calc '(1+2)^10/7' [--json]   # calculator; exits 1 if it isn't a calculation
 seekr refresh                      # pick up new, changed and deleted files
 seekr index [--full]               # rebuild; --full also asks LaunchServices
 seekr doctor                       # Spotlight health + index stats
@@ -98,7 +99,7 @@ you actually launch.
 
 | Key          | Action                                        |
 |--------------|-----------------------------------------------|
-| `⏎`          | open, then quit (launcher: hide)              |
+| `⏎`          | open, then quit (launcher: hide); on an answer, copy it |
 | `^r`         | reveal in Finder                              |
 | `^e`         | open enclosing folder                         |
 | `^y`         | copy path                                     |
@@ -142,6 +143,19 @@ Notes, …) cannot be added this way. `seekr searches` lists the configured
 searches and whether their apps are installed; `seekr search-in spotify daft
 punk` runs one from the shell, and `--print --json` shows what it would open.
 
+### Calculator
+
+Type a calculation and its answer is pinned above the results, selected:
+`⏎` copies it (the launcher then hides and hands focus back), `^y` copies it
+and stays, `↓` moves on to the files. `+ - * / ^ %`, `×` `÷`, `3 x 4`,
+parentheses, `1e3`, `1,234,567`, `pi` `e`, `5!`, `50%`, `15% of 80`,
+`200 + 10%` (220), and `sqrt abs round floor ceil ln log log2 sin cos tan
+asin acos atan exp` (radians) all work. Answers keep 14 significant digits
+and switch to scientific notation beyond 1e15. It only triggers on a real
+expression: plain numbers, dates (`2024-01-05`), phone numbers, versions
+(`1.2.3`) and names like `IMG_1234` or `report-2` search as usual; `1/0` has
+no answer. `seekr calc --json` prints `{input, expr, value, raw, display}`.
+
 ## Freshness
 
 Apps are rescanned live on every start. Files come from the index, which is
@@ -174,7 +188,8 @@ seekr is logged, so things you use often float up. Python virtualenvs,
 ```
 crates/seekr-core   library, no UI: items, query parser, providers (apps, places, files),
                     SQLite index + usage log, nucleo matcher + re-ranking,
-                    actions (open/reveal/copy/quick-look), app searches (⇥), doctor
+                    actions (open/reveal/copy/quick-look), app searches (⇥),
+                    calculator, doctor
 crates/seekr        binary: clap CLI + ratatui TUI; launcher glue (resident mode)
 contrib/            Cmd+Space launcher (Hammerspoon config, kitty config)
 ```
@@ -191,5 +206,5 @@ same operations can later be exposed to an AI agent as tools.
 - FSEvents watcher for live index updates.
 - Document content search (text/PDF extraction into FTS5).
 - More providers: browser bookmarks and history, contacts, settings panes,
-  clipboard, calculator, actions such as `> sleep`.
+  clipboard, actions such as `> sleep`.
 - MCP server exposing search / open / reveal / refresh as agent tools.
