@@ -123,11 +123,12 @@ Type arithmetic and the answer is pinned above the results, selected. `⏎`
 copies it (the launcher then hides and hands focus back), `^y` copies it and
 stays, `↓` moves on to the files.
 
-It understands `+ - * / ^ %` (also `×`, `÷`, `**` and `3 x 4`), parentheses,
-`1e3`, `1,234,567`, `pi`, `tau`, `e`, `5!`, `50%`, `15% of 80`, `200 + 10%`
-(220), `√16`, and `sqrt abs round floor ceil ln log log2 log10 exp sin cos tan
-asin acos atan` (in radians). Answers keep 14 significant digits and use
-scientific notation outside 1e-6 to 1e15.
+It understands `+ - * / ^ %` (also `×`, `÷`, `**` and `3 x 4`), parentheses
+(`5(6+7)` and `(1+2)(3+4)` multiply, left to right like `*`), `1e3`,
+`1,234,567`, `pi`, `tau`, `e`, `5!`, `50%`, `15% of 80`, `200 + 10%` (220),
+`√16`, and `sqrt abs round floor ceil ln log log2 log10 exp sin cos tan asin
+acos atan` (in radians). Answers keep 14 significant digits and use scientific
+notation outside 1e-6 to 1e15.
 
 Anything that parses as arithmetic gets an answer, dates (`2024-01-05` is
 2018) and phone numbers included, with the matching files still listed below
