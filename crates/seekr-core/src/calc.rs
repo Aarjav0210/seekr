@@ -319,6 +319,13 @@ impl Parser<'_> {
                 Some(Tok::Op('/')) => Bin::Div,
                 // A `%` still here is modulo: postfix() took the percent signs.
                 Some(Tok::Op('%')) => Bin::Mod,
+                // `5(6+7)`, `(1+2)(3+4)`, `2pi`, `2√9`: juxtaposition multiplies.
+                // A bare number never follows implicitly (`2 3`, `(555) 123-4567`).
+                Some(Tok::Open | Tok::Ident(_) | Tok::Op('√')) if self.operand_at(0) => {
+                    let r = self.unary()?;
+                    l = Node::Bin(Bin::Mul, Box::new(l), Box::new(r));
+                    continue;
+                }
                 _ => return Ok(l),
             };
             self.pos += 1;
@@ -711,6 +718,17 @@ mod tests {
         ("2023-2024", "-1"),
         ("01+1", "2"),
         ("007*2", "14"),
+        ("5(6+7)", "65"),
+        ("(1+2)(3+4)", "21"),
+        ("2(3)", "6"),
+        ("2pi", "6.2831853071796"),
+        ("2√9", "6"),
+        ("3sqrt(16)", "12"),
+        ("(2+3)pi", "15.707963267949"),
+        ("-2(3)", "-6"),
+        ("2^2(3)", "12"),
+        ("5!(2)", "240"),
+        ("6/2(1+2)", "9"),
     ];
 
     /// Queries that must not produce an answer.
@@ -757,8 +775,6 @@ mod tests {
         "3x4",
         "mp3",
         "h264",
-        "2pi",
-        "2(3)",
         "5.+1",
         "hello!",
         "what is 2+2",
@@ -841,6 +857,10 @@ mod tests {
             ("(2+1)!", "(2 + 1)!"),
             ("10 % 3", "10 % 3"),
             ("2*pi", "2 * pi"),
+            ("5(6+7)", "5 * (6 + 7)"),
+            ("(1+2)(3+4)", "(1 + 2) * (3 + 4)"),
+            ("2pi", "2 * pi"),
+            ("6/2(1+2)", "6 / 2 * (1 + 2)"),
         ];
         for (input, want) in cases {
             assert_eq!(evaluate(input).map(|c| c.expr), Ok(want.to_string()), "{input:?}");
