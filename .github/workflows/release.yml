@@ -1,0 +1,55 @@
+# Publishes a GitHub release for every v* tag: the archive install.sh downloads
+# (a universal binary, the launcher files, the docs) and its checksum. The tag
+# must match the version in crates/seekr/Cargo.toml:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag against the crate version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/seekr/Cargo.toml | head -n 1)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crates/seekr/Cargo.toml version $v" >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Package
+        run: contrib/package.sh
+
+      - name: Smoke-test the packaged binary
+        run: |
+          tar -xzf dist/seekr-macos-universal.tar.gz -C "$RUNNER_TEMP"
+          bin="$RUNNER_TEMP/seekr/seekr"
+          lipo -archs "$bin" | grep -q x86_64
+          lipo -archs "$bin" | grep -q arm64
+          "$bin" --version
+          test "$("$bin" calc '5(6+7)')" = 65
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "seekr ${GITHUB_REF_NAME#v}" --generate-notes

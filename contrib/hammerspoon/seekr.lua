@@ -48,6 +48,10 @@ local HOME = os.getenv("HOME")
 -- "ctrl+space", "cmd+shift+space". contrib/install-launcher.sh --hotkey
 -- rewrites this line in the installed copy.
 M.hotkey = "cmd+space"
+-- The seekr binary the window runs. contrib/install-launcher.sh rewrites this
+-- line in the installed copy with the one it found; when it is empty, the
+-- usual install locations are tried (see M.seekr).
+M.seekrPath = ""
 M.maxSize = { w = 1100, h = 600 } -- text area in pixels; shrinks on small screens
 M.config = HOME .. "/.config/seekr/kitty.conf"
 -- Written by `seekr --resident` as {"pid": N, "park": "USR2"}; deleted when it
@@ -66,7 +70,7 @@ local INSTANCE_GROUP = "seekr"
 
 local function firstExisting(paths)
   for _, p in ipairs(paths) do
-    if hs.fs.attributes(p) then return p end
+    if p ~= "" and hs.fs.attributes(p) then return p end
   end
   return nil
 end
@@ -79,7 +83,9 @@ M.kitten = firstExisting({
   "/usr/local/bin/kitten",
 })
 M.seekr = firstExisting({
+  M.seekrPath,
   HOME .. "/.cargo/bin/seekr",
+  HOME .. "/.local/bin/seekr", -- install.sh
   "/opt/homebrew/bin/seekr",
   "/usr/local/bin/seekr",
 })

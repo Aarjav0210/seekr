@@ -24,14 +24,40 @@ Every key is listed in [KEYBOARD_SHORTCUTS.md](KEYBOARD_SHORTCUTS.md).
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | sh
+```
+
+This puts the latest release, one binary for Apple silicon and Intel Macs
+(macOS 11 or newer), in `~/.local/bin` and adds that folder to your PATH in
+`~/.zshrc`. Then it offers to set up [the launcher](#the-launcher): it
+installs kitty and Hammerspoon with Homebrew (and Homebrew itself if it's
+missing) and turns off Spotlight's ⌘Space shortcut. macOS asks you to open
+Hammerspoon, to let your terminal control it, and to allow it under
+Privacy & Security › Accessibility. The first index can make macOS ask whether
+your Desktop, Documents and Downloads may be read; allow it, or seekr won't find
+files there.
+
+Run the same command again to upgrade. Options go after `sh -s --`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | sh -s -- --no-launcher
+```
+
+- `--no-launcher` installs just the `seekr` command; `--yes` sets up the
+  launcher without asking.
+- `--hotkey ctrl+space` uses another key and gives ⌘Space back to Spotlight;
+  later runs keep it.
+- `--version v0.1.0` installs that release instead of the latest.
+- `--uninstall` removes seekr, the launcher, the index and the settings, takes
+  `~/.local/bin` back off your PATH and gives ⌘Space back. kitty and
+  Hammerspoon stay installed.
+
+From source, with Rust 1.85 or newer:
+
+```sh
 cargo install --path crates/seekr      # the binary, into ~/.cargo/bin
 contrib/install-launcher.sh            # optional: the ⌘Space launcher
 ```
-
-seekr needs macOS and Rust 1.85 or newer. The launcher script also uses
-Homebrew to install kitty (0.42 or newer) and Hammerspoon; macOS asks once to
-allow Hammerspoon under Privacy & Security › Accessibility.
-[The launcher](#the-launcher) describes what the script changes.
 
 ## Features
 
@@ -153,7 +179,8 @@ very first lookup on a fresh Mac can come back empty.
 
 ### The launcher
 
-`contrib/install-launcher.sh` binds ⌘Space, through Hammerspoon, to a seekr
+The installer (or `contrib/install-launcher.sh` in a checkout) binds ⌘Space,
+through Hammerspoon, to a seekr
 window without a title bar, centred on the screen and desktop you are working
 on. The first press starts it in about a second. After that seekr stays
 resident, and each press brings it back within a couple of frames, ready to
@@ -168,9 +195,9 @@ type, while the index refreshes in the background.
 ⌘Space belongs to Spotlight, and on macOS 15 also to Siri when held, so the
 installer turns those two shortcuts off. Spotlight and Siri keep working;
 System Settings › Keyboard › Keyboard Shortcuts › Spotlight and System
-Settings › Siri turn the shortcuts back on. For another key, run
-`contrib/install-launcher.sh --hotkey ctrl+space`: the script gives ⌘Space
-back, and later runs keep the key you chose. When another app already holds
+Settings › Siri turn the shortcuts back on. For another key, run the installer
+with `--hotkey ctrl+space` (or `contrib/install-launcher.sh --hotkey
+ctrl+space`): it gives ⌘Space back, and later runs keep the key you chose. When another app already holds
 the key as a shared hotkey, Hammerspoon watches for it with an event tap
 instead; the installer prints which of the two it uses.
 
@@ -263,12 +290,20 @@ crates/seekr-core   library, no UI: items, query parser, providers (apps, places
 crates/seekr        the binary: CLI (main.rs, cli.rs), finder (tui/: state and
                     keys, query line, drawing, definition card), background
                     loading, launcher glue (resident mode)
-contrib/            the ⌘Space launcher: Hammerspoon config, kitty config, installer
+contrib/            the ⌘Space launcher: Hammerspoon config, kitty config, installer;
+                    package.sh, which builds the release archive
+install.sh          the curl installer: downloads a release, installs and uninstalls
 ```
 
 The core crate has no UI and every command speaks JSON, so the same
 operations can later be exposed to an AI agent as tools. `cargo test` runs the
 unit tests; the dictionary test is skipped on a Mac without the dictionary.
+
+To release, bump `version` in `crates/seekr/Cargo.toml`, then push a matching
+tag: `git tag v0.2.0 && git push origin v0.2.0`.
+`.github/workflows/release.yml` tests, builds the universal binary with
+`contrib/package.sh` and publishes it as a GitHub release, which `install.sh`
+picks up as the latest.
 
 ## Roadmap
 
