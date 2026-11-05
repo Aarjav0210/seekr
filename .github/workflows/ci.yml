@@ -1,0 +1,23 @@
+# Runs the tests on every pull request and push to main, on the same macOS
+# image as the release, so a failure shows up before a tag is pushed.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - name: Test
+        run: cargo test --locked
+

@@ -309,9 +309,6 @@ pub fn parse(word: &str, raw: &str) -> Option<Definition> {
     };
     def.pronunciation = pron.map(str::to_string).filter(|p| !p.is_empty());
     let mut head_tokens: Vec<&str> = head.split_whitespace().collect();
-    if head_tokens.len() > 1 && head_tokens.last().is_some_and(|t| t.chars().all(|c| c.is_ascii_digit())) {
-        head_tokens.pop();
-    }
     // `discord noun [mass noun] | ˈdɪskɔːd | 1 …`: the part of speech came first.
     let pos_at = (1..head_tokens.len()).find(|&i| pos_at_start(&head_tokens[i..].join(" ")).is_some());
     let body = match pos_at {
@@ -321,6 +318,12 @@ pub fn parse(word: &str, raw: &str) -> Option<Definition> {
         }
         None => body.to_string(),
     };
+    // `kitty 1 kit·ty | ˈkidē |`: the New Oxford American Dictionary (the
+    // default on US Macs) follows the headword with its syllables.
+    head_tokens.retain(|t| !t.contains('·'));
+    if head_tokens.len() > 1 && head_tokens.last().is_some_and(|t| t.chars().all(|c| c.is_ascii_digit())) {
+        head_tokens.pop();
+    }
     def.headword = head_tokens.join(" ");
     if def.headword.is_empty() {
         def.headword = def.word.clone();
@@ -406,7 +409,10 @@ fn split_sections(s: &str) -> (&str, Option<String>) {
 
 /// `head | pron | body`, when the first `|` pair is close to the start.
 fn header_split(s: &str) -> Option<(&str, &str, &str)> {
-    let i = s.find('|')?;
+    // The first `|` outside brackets: in `mouse noun (plural mice | mīs |) | mous | 1 …`
+    // the bracketed pair is the plural's pronunciation.
+    let d = depths(s);
+    let i = s.match_indices('|').map(|(i, _)| i).find(|&i| d[i] == 0)?;
     if s[..i].chars().count() > 80 {
         return None;
     }
@@ -787,6 +793,10 @@ mod tests {
     const CAT_HEAD: &str = "cat 1 | kat | noun 1 a small domesticated carnivorous mammal with soft fur, a short snout, and retractable claws. It is widely kept as a pet or for catching mice. The cat family also includes the ocelot, serval, margay, lynx, and the big cats • a wild animal of the cat family. See also big cat: a marbled cat. • historical short for cat-o'-nine-tails • short for catboat 2 informal, mainly North American English (especially among jazz enthusiasts) a man: this West Coast cat had managed him since the early 80s | the cat went crazy on the horn. 3 historical a short tapered stick used in the game of tipcat. verb (cats, catting, catted) [with object] Nautical raise (an anchor) from the surface of the water to the cathead: I kept her off the wind and sailing free until I had the anchor catted. PHRASES all cats are grey in the dark proverb the qualities that distinguish people from one another are obscured in some circumstances. ORIGIN Old English catt, catte, of Germanic origin.";
     const WAS: &str = "was | wɒz, wəz | verb first and third person singular past of be ";
     const XCODE: &str = "Xcode\nA set of software development tools from Apple used to create apps for Apple platforms including Mac, iPhone, iPad, and Apple\u{a0}Watch. Xcode includes the Xcode IDE, Swift, and Objective-C compilers, the Instruments analysis tool, OS simulators, the latest SDKs, and hundreds of powerful features. Xcode is available in the Mac App Store.\n";
+    // The same entries in the New Oxford American Dictionary, as returned on a US Mac.
+    const NOAD_SERENDIPITY: &str = "serendipity ser·en·dip·i·ty | ˌserənˈdipədē | noun the occurrence and development of events by chance in a happy or beneficial way: a fortunate stroke of serendipity | a series of small serendipities. ORIGIN 1754: coined by Horace Walpole, suggested by The Three Princes of Serendip, the title of a fairy tale in which the heroes ‘were always making discoveries, by accidents and sagacity, of things they were not in quest of’.";
+    const NOAD_KITTY: &str = "kitty 1 kit·ty | ˈkidē | noun (plural kitties) a fund of money for communal use, made up of contributions from a group of people. • a pool of money in some gambling card games. ORIGIN early 19th century (denoting a jail): of unknown origin.";
+    const NOAD_MOUSE: &str = "mouse noun (plural mice | mīs |) | mous | 1 a small rodent that typically has a pointed snout, relatively large ears and eyes, and a long tail. Family Muridae: many genera and numerous species. Also, some species in the families Heteromyidae, Zapodidae, and Muscardinidae • (in general use) any small mammal similar to a mouse, such as a shrew or vole. • a shy, timid, and quiet person: Jane may be a bit of a mouse, but she is very nosy. • a dull light brown color reminiscent of a mouse's fur: her blonde hair dulled to mouse. 2 (plural mice or plural mouses) a small handheld device that is dragged across a flat surface to move the cursor on a computer screen, typically having buttons that are pressed to control functions: copy the file with a click of the mouse | [as modifier] : the right mouse button. 3 informal a lump or bruise, especially one on or near the eye: she touched the mouse under her eye. verb [no object] | mous | 1 (of a cat or owl) hunt for or catch mice: female cats are usually much better at mousing than males. • [with adverbial] prowl around as if searching: he was mousing among the books of the old library. 2 [with adverbial of direction] use a mouse to move a cursor on a computer screen: simply mouse over any item in the list. DERIVATIVES mouse-like | ˈmousˌlīk | adjective USAGE Is the plural of mouse in the computing sense mice or mouses? People often feel that this sense needs its own distinctive plural, but in fact the ordinary plural mice is more common, and the first recorded use of the term in the plural (1984) is mice ORIGIN Old English mūs, (plural) mȳs, of Germanic origin; related to Dutch muis and German Maus, from an Indo-European root shared by Latin and Greek mus.";
 
     fn names(d: &Definition) -> Vec<Option<&str>> {
         d.parts.iter().map(|p| p.name.as_deref()).collect()
@@ -923,6 +933,31 @@ mod tests {
         assert!(is_entry_for("mice", &d));
         let d = parse("was", WAS).unwrap();
         assert_eq!(d.parts[0].senses[0].text, "first and third person singular past of be");
+    }
+
+    /// The New Oxford American Dictionary, the default on US Macs (and on
+    /// GitHub's macOS runners), follows the headword with its syllables and
+    /// can put a plural's pronunciation before the word's own.
+    #[test]
+    fn american_dictionary_entries() {
+        let d = parse("serendipity", NOAD_SERENDIPITY).unwrap();
+        assert_eq!(d.headword, "serendipity");
+        assert_eq!(d.pronunciation.as_deref(), Some("ˌserənˈdipədē"));
+        assert_eq!(names(&d), [Some("noun")]);
+        assert!(d.parts[0].senses[0].text.starts_with("the occurrence and development"));
+
+        let d = parse("kitty", NOAD_KITTY).unwrap();
+        assert_eq!(d.headword, "kitty");
+        assert_eq!(d.pronunciation.as_deref(), Some("ˈkidē"));
+        assert_eq!(d.parts[0].note.as_deref(), Some("(plural kitties)"));
+
+        let d = parse("mice", NOAD_MOUSE).unwrap();
+        assert_eq!(d.headword, "mouse");
+        assert_eq!(d.pronunciation.as_deref(), Some("mous"));
+        assert_eq!(names(&d), [Some("noun"), Some("verb")]);
+        assert_eq!(d.parts[0].note.as_deref(), Some("(plural mice)"));
+        assert!(d.parts[0].senses[0].text.starts_with("a small rodent"));
+        assert!(is_entry_for("mice", &d));
     }
 
     #[test]

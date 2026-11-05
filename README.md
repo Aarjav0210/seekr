@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | 
   launcher without asking.
 - `--hotkey ctrl+space` uses another key and gives ⌘Space back to Spotlight;
   later runs keep it.
-- `--version v0.1.0` installs that release instead of the latest.
+- `--version v0.1.1` installs that release instead of the latest.
 - `--uninstall` removes seekr, the launcher, the index and the settings, takes
   `~/.local/bin` back off your PATH and gives ⌘Space back. kitty and
   Hammerspoon stay installed.
