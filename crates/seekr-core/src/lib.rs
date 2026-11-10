@@ -7,13 +7,15 @@
 //! - [`index::Index`]: SQLite-backed persistent index + usage (frecency) log.
 //! - [`search::Searcher`]: incremental fuzzy matching (nucleo) with kind/frecency-aware re-ranking.
 //! - [`actions`]: open / reveal / copy, the primitive "tools".
-//! - [`app_search::AppSearch`]: "Tab to search" — hand the query to Arc, Spotify, …
+//! - [`app_search::AppSearch`]: "Tab to search" — hand the query to the default browser, Spotify, …
+//! - [`browser`]: which browser that is, from LaunchServices' `https` handler.
 //! - [`calc`]: the calculator (`2+2*3`, `sqrt(2)`, `15% of 80`).
 //! - [`doctor`]: diagnostics for Spotlight and our own index.
 //! - [`define`]: dictionary definitions from the macOS system dictionary.
 
 pub mod actions;
 pub mod app_search;
+pub mod browser;
 pub mod calc;
 pub mod config;
 pub mod define;

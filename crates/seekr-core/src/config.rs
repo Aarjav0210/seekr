@@ -1,9 +1,31 @@
 use crate::app_search::{self, AppSearch};
 use crate::item::{expand_tilde, Kind};
+use crate::providers::apps;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+
+/// Where applications live unless `app_dirs` says otherwise.
+pub const DEFAULT_APP_DIRS: &[&str] = &[
+    "/Applications",
+    "/Applications/Utilities",
+    "~/Applications",
+    "/System/Applications",
+    "/System/Applications/Utilities",
+    "/System/Library/CoreServices/Applications",
+    "/System/Library/CoreServices/Finder.app",
+];
+
+/// [`DEFAULT_APP_DIRS`] that exist on this Mac, `~` expanded.
+pub fn default_app_dir_paths() -> Vec<PathBuf> {
+    DEFAULT_APP_DIRS
+        .iter()
+        .map(|d| expand_tilde(d))
+        .filter(|p| p.exists())
+        .collect()
+}
 
 /// User configuration, stored at `~/.config/seekr/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,9 +46,14 @@ pub struct Config {
     /// Kinds that are only loaded into the matcher when explicitly scoped
     /// (e.g. `code:`). Keeps the default view small and fast.
     pub lazy_kinds: Vec<String>,
-    /// Apps that Tab hands the query to (`arc`, `spotify`). See [`AppSearch`];
-    /// setting this replaces the built-in list.
+    /// Apps that Tab hands the query to (installed browsers, `spotify`). See
+    /// [`AppSearch`]; setting this replaces the built-in list. After
+    /// [`Config::load`] only searches whose app is installed remain here.
     pub searches: Vec<AppSearch>,
+    /// Searches [`Config::load`] set aside because their app is not installed:
+    /// typing their keyword means nothing special. Listed by `seekr searches`.
+    #[serde(skip)]
+    pub unavailable: Vec<AppSearch>,
 }
 
 impl Default for Config {
@@ -49,18 +76,7 @@ impl Default for Config {
             .collect();
         Config {
             roots,
-            app_dirs: [
-                "/Applications",
-                "/Applications/Utilities",
-                "~/Applications",
-                "/System/Applications",
-                "/System/Applications/Utilities",
-                "/System/Library/CoreServices/Applications",
-                "/System/Library/CoreServices/Finder.app",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+            app_dirs: DEFAULT_APP_DIRS.iter().map(|s| s.to_string()).collect(),
             skip_dirs: [
                 "node_modules",
                 ".git",
@@ -107,6 +123,7 @@ impl Default for Config {
             refresh_on_launch: true,
             lazy_kinds: vec!["code".to_string()],
             searches: AppSearch::builtin(),
+            unavailable: Vec::new(),
         }
     }
 }
@@ -152,24 +169,51 @@ impl Config {
         if path.exists() {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let cfg: Config =
+            let mut cfg: Config =
                 toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
             cfg.validate()
                 .with_context(|| format!("in {}", path.display()))?;
+            cfg.drop_uninstalled_searches();
             Ok(cfg)
         } else {
-            let cfg = Config::default();
+            let mut cfg = Config::default();
             if let Some(dir) = path.parent() {
                 fs::create_dir_all(dir).ok();
             }
             fs::write(&path, cfg.template()).ok();
+            cfg.drop_uninstalled_searches();
             Ok(cfg)
         }
     }
 
+    /// Move the searches whose app is not in `app_dirs` to `unavailable`, so
+    /// Tab on `arc` cycles the scope like any other word on a Mac without Arc.
+    fn drop_uninstalled_searches(&mut self) {
+        let installed: HashSet<String> = apps::scan_app_dirs(self)
+            .into_iter()
+            .filter_map(|a| a.bundle_id)
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        self.retain_installed_searches(&installed);
+    }
+
+    /// `installed`: lowercased bundle identifiers. Searches without an app
+    /// (plain web URLs) always stay.
+    pub fn retain_installed_searches(&mut self, installed: &HashSet<String>) {
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.searches)
+            .into_iter()
+            .partition(|s| {
+                s.app
+                    .as_ref()
+                    .is_none_or(|b| installed.contains(&b.to_ascii_lowercase()))
+            });
+        self.searches = keep;
+        self.unavailable.extend(gone);
+    }
+
     /// App searches must have usable keywords and templates; see [`AppSearch::validate`].
     pub fn validate(&self) -> Result<()> {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for s in &self.searches {
             s.validate()?;
             if !seen.insert(s.keyword.to_ascii_lowercase()) {
@@ -230,8 +274,11 @@ impl Config {
              # Apps that Tab hands the query to: select the app (or type its keyword),\n\
              # press Tab, type the terms, Enter. `{{query}}` is replaced by the\n\
              # percent-encoded terms; `app` is the bundle id that must open the URL\n\
-             # (`osascript -e 'id of app \"Arc\"'` prints it). Only apps with a URL scheme,\n\
-             # or browsers, can be searched this way. Setting this replaces the whole\n\
+             # (`osascript -e 'id of app \"Firefox\"'` prints it). Only apps with a URL\n\
+             # scheme, or browsers, can be searched this way; an entry whose app is not\n\
+             # installed is ignored. The browsers below are the ones installed right\n\
+             # now, your default first; without `app`, a web URL opens in whichever\n\
+             # browser is the default when you search. Setting this replaces the whole\n\
              # list, so keep the entries you still want.\n\
              {searches}",
             roots = arr(&self.roots),
@@ -270,7 +317,7 @@ impl Config {
         Kind::ALL.into_iter().filter(|&k| !self.is_lazy(k)).collect()
     }
 
-    /// The app search whose keyword is `word` (`arc`), case-insensitively.
+    /// The app search whose keyword is `word` (`spotify`), case-insensitively.
     pub fn search_by_keyword(&self, word: &str) -> Option<&AppSearch> {
         app_search::by_keyword(&self.searches, word)
     }
@@ -296,6 +343,22 @@ mod tests {
             .join("\n");
         let cfg: Config = toml::from_str(&toml_text).unwrap();
         assert_eq!(cfg.searches, AppSearch::builtin());
+    }
+
+    #[test]
+    fn searches_for_missing_apps_are_set_aside() {
+        let text = "[[searches]]\nkeyword = \"yt\"\nurl = \"https://youtube.com/results?search_query={query}\"\n\
+                    [[searches]]\nkeyword = \"arc\"\nurl = \"https://google.com/search?q={query}\"\napp = \"company.thebrowser.Browser\"\n\
+                    [[searches]]\nkeyword = \"spotify\"\nurl = \"spotify:search:{query}\"\napp = \"com.spotify.client\"\n";
+        let mut cfg: Config = toml::from_str(text).unwrap();
+        let installed: HashSet<String> = ["com.spotify.client".to_string()].into_iter().collect();
+        cfg.retain_installed_searches(&installed);
+        let kws: Vec<&str> = cfg.searches.iter().map(|s| s.keyword.as_str()).collect();
+        assert_eq!(kws, ["yt", "spotify"], "web searches and installed apps stay");
+        assert_eq!(cfg.unavailable.len(), 1);
+        assert_eq!(cfg.unavailable[0].keyword, "arc");
+        assert!(cfg.search_by_keyword("arc").is_none());
+        assert!(cfg.search_for_app("company.thebrowser.Browser").is_none());
     }
 
     #[test]
