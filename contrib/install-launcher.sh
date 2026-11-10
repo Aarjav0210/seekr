@@ -26,6 +26,8 @@ INIT="$HOME/.hammerspoon/init.lua"
 DATA="$HOME/Library/Application Support/seekr"
 DEFAULT_HOTKEY=cmd+space
 KITTY_CONF="$HOME/.config/seekr/kitty.conf"
+# The opacity chosen with --opacity, kept for later runs (none: the config's).
+OPACITY_FILE="$DATA/launcher-opacity"
 
 HOTKEY=""
 OPACITY=""
@@ -134,7 +136,7 @@ if [ -n "$UNINSTALL" ]; then
   end_resident
   FOUND=""
   if [ -f "$LUA" ]; then FOUND=1; fi
-  rm -f "$LUA" "$KITTY_CONF"
+  rm -f "$LUA" "$KITTY_CONF" "$OPACITY_FILE"
   if [ -f "$INIT" ] && grep -qxF 'require("seekr")' "$INIT"; then
     # Written back in place, so a symlinked init.lua stays a symlink.
     KEPT=$(grep -vxF 'require("seekr")' "$INIT" || true)
@@ -166,10 +168,10 @@ case "$HOTKEY" in
   ''|*[!a-z0-9+]*) echo "hotkey: letters, digits and '+' only, e.g. cmd+space (got '$HOTKEY')" >&2; exit 2 ;;
 esac
 
-# Likewise the opacity: without --opacity, keep the installed one, else the
-# kitty config's (translucent).
-if [ -z "$OPACITY" ] && [ -f "$KITTY_CONF" ]; then
-  OPACITY=$(sed -n 's/^background_opacity \([0-9.]*\)$/\1/p' "$KITTY_CONF")
+# Likewise the opacity: without --opacity, keep the one chosen before, else
+# the kitty config's (translucent).
+if [ -z "$OPACITY" ] && [ -f "$OPACITY_FILE" ]; then
+  OPACITY=$(cat "$OPACITY_FILE")
 fi
 case "$OPACITY" in
   ''|0|1|0.[0-9]*|1.0|1.00|.[0-9]*) ;;
@@ -226,6 +228,8 @@ mkdir -p "$HOME/.config/seekr"
 cp "$HERE/kitty/seekr.conf" "$KITTY_CONF"
 if [ -n "$OPACITY" ]; then
   sed -i '' "s/^background_opacity .*/background_opacity $OPACITY/" "$KITTY_CONF"
+  mkdir -p "$DATA"
+  printf '%s\n' "$OPACITY" > "$OPACITY_FILE"
 fi
 
 mkdir -p "$HOME/.hammerspoon"
