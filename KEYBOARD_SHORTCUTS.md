@@ -3,18 +3,21 @@
 Every key seekr understands, by where you are. `^` is Control, `⌥` Option,
 `⌘` Command, `⇥` Tab, `⏎` Return, `⌫` Delete and `⌦` forward delete (fn+⌫).
 
-"Quit / hide": in a terminal the finder quits; in the ⌘Space launcher the
-window hides instead and seekr stays ready for the next press.
+"Quit / hide": in a terminal the finder quits; in the ⌘Space launcher
+(seekr.app) the window hides instead and seekr stays ready for the next press.
 
 ## The launcher
 
 | Key | Action |
 |-----|--------|
 | `⌘Space` | Show seekr on the current desktop and screen. |
-| `⌘Space` while seekr is in front | Hide it, keeping the query: it comes back selected (see [A selected query](#a-selected-query)). |
+| `⌘Space` while seekr is up, or a click elsewhere | Hide it, keeping the query: it comes back selected (see [A selected query](#a-selected-query)). |
+| `⌘W`, `⌘H`, `⌘Q` | Hide it the same way. |
+| `⌘V` | Paste into the query (line breaks dropped). |
+| `⌘A` | Select the query. |
 
-The hotkey is set by `contrib/install-launcher.sh --hotkey <mods+key>`, for
-example `--hotkey ctrl+space`.
+The hotkey is set by the installer's `--hotkey <mods+key>`, for example
+`--hotkey ctrl+space`.
 
 ## Results
 
@@ -28,8 +31,8 @@ example `--hotkey ctrl+space`.
 | `⇥` | On an installed browser or Spotify, or with its keyword (`safari`, `firefox`, `chrome`, … / `spotify`) typed: search inside the app (see [Searching inside an app](#searching-inside-an-app)). Otherwise cycle the scope: none → `app:` → `doc:` → `dir:` → none, keeping the terms and filters. |
 | `^x` | Refresh the index now. |
 | `^l` | With a definition card showing: open the word in Dictionary.app, then quit / hide. |
-| `esc` | Clear the query. On an empty query: quit / hide (the launcher hands focus back to the window you came from). |
-| `^c`, `^g` | Quit, in the launcher too. The next `⌘Space` starts a fresh seekr. |
+| `esc` | Clear the query. On an empty query: quit / hide (you are back in the app you came from). |
+| `^c`, `^g` | Quit / hide. |
 
 ## Moving the selection
 
@@ -58,11 +61,10 @@ example `--hotkey ctrl+space`.
 
 `^e` and `End` are taken by the results, so end-of-line is `⌘→`.
 
-Terminal notes: `⌘←`, `⌘→` and `⌘⌫` work in the launcher, whose kitty config
-maps them (`contrib/kitty/seekr.conf`); in other terminals use `^a`, `⌥→` and
-`^u`. `⌥` chords need the terminal to send Option as Alt (the launcher's kitty
-does; in Terminal.app turn on "Use Option as Meta key"). macOS keeps `^←` and
-`^→` for switching desktops unless you turn those shortcuts off.
+Terminal notes: `⌘←`, `⌘→` and `⌘⌫` work in the launcher; in a terminal use
+`^a`, `⌥→` and `^u`. `⌥` chords need the terminal to send Option as Alt (the
+launcher does; in Terminal.app turn on "Use Option as Meta key"). macOS keeps
+`^←` and `^→` for switching desktops unless you turn those shortcuts off.
 
 ## A selected query
 
@@ -81,7 +83,7 @@ When the query is arithmetic, its answer is the first row and starts out selecte
 
 | Key | Action |
 |-----|--------|
-| `⏎` | Copy the answer. In the launcher, also hide and hand focus back. |
+| `⏎` | Copy the answer. In the launcher, also hide. |
 | `^y` | Copy the answer and stay. |
 | `↓` | Move on to the results. |
 

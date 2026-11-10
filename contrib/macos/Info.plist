@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- seekr.app's Info.plist; contrib/package.sh fills in @VERSION@. LSUIElement
+     keeps it out of the Dock and the app switcher: its window comes from the
+     hotkey. The usage strings are what macOS shows when the index first walks
+     these folders. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>seekr</string>
+	<key>CFBundleExecutable</key>
+	<string>seekr</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.aarjav0210.seekr</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>seekr</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT License</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>seekr indexes your Desktop so its files show up when you search.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>seekr indexes your Documents so they show up when you search.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>seekr indexes your Downloads so they show up when you search.</string>
+</dict>
+</plist>

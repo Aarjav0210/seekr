@@ -1,5 +1,6 @@
 mod cli;
-mod launcher;
+#[cfg(target_os = "macos")]
+mod gui;
 mod loader;
 mod tui;
 mod util;
@@ -15,11 +16,6 @@ struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
 
-    /// Stay alive after Enter/Esc: hide the launcher window instead of quitting, so the
-    /// next hotkey press (Cmd+Space) shows the UI instantly. Used by contrib/ (Hammerspoon + kitty).
-    #[arg(long)]
-    resident: bool,
-
     /// Initial query for the interactive UI (e.g. `seekr app: whatsapp`).
     #[arg(trailing_var_arg = true)]
     query: Vec<String>,
@@ -29,9 +25,6 @@ struct Cli {
 enum Cmd {
     /// Interactive fuzzy finder (default when no subcommand is given).
     Tui {
-        /// See `seekr --help`.
-        #[arg(long)]
-        resident: bool,
         #[arg(trailing_var_arg = true)]
         query: Vec<String>,
     },
@@ -114,13 +107,46 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The launcher: seekr in a window of its own that a hotkey brings up from
+    /// any app (what seekr.app runs, one copy at a time). The hotkey is
+    /// --hotkey, else `defaults read io.github.aarjav0210.seekr hotkey`, else cmd+space.
+    #[cfg(target_os = "macos")]
+    App {
+        /// Modifiers and key joined with "+", e.g. cmd+space, ctrl+space, cmd+shift+k.
+        #[arg(long)]
+        hotkey: Option<String>,
+        /// Show the window right away instead of waiting for the hotkey.
+        #[arg(long)]
+        show: bool,
+        /// Draw the window into this PNG and exit, without showing it.
+        #[arg(long, value_name = "PNG", hide = true)]
+        snapshot: Option<PathBuf>,
+        /// The query typed for --snapshot.
+        #[arg(long, default_value = "", hide = true)]
+        query: String,
+        /// Only check that the hotkey is one seekr understands (for install.sh).
+        #[arg(long, hide = true)]
+        check: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        None => tui::run(cli.query.join(" "), cli.resident),
-        Some(Cmd::Tui { resident, query }) => tui::run(query.join(" "), resident),
+        #[cfg(target_os = "macos")]
+        None if cli.query.is_empty() && opened_as_app() => gui::run(gui::Options {
+            hotkey: None,
+            show: false,
+            snapshot: None,
+            query: String::new(),
+            check: false,
+        }),
+        None => tui::run(cli.query.join(" ")),
+        Some(Cmd::Tui { query }) => tui::run(query.join(" ")),
+        #[cfg(target_os = "macos")]
+        Some(Cmd::App { hotkey, show, snapshot, query, check }) => {
+            gui::run(gui::Options { hotkey, show, snapshot, query, check })
+        }
         Some(Cmd::Search {
             query,
             limit,
@@ -149,4 +175,13 @@ fn main() -> Result<()> {
             cli::calc(&expr.join(" "), json)
         }
     }
+}
+
+/// Started by double-clicking seekr.app (or `open`): LaunchServices runs the
+/// binary inside the bundle, with launchd as its parent and no terminal.
+#[cfg(target_os = "macos")]
+fn opened_as_app() -> bool {
+    use std::io::IsTerminal;
+    let in_bundle = std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"));
+    in_bundle && std::os::unix::process::parent_id() == 1 && !std::io::stdin().is_terminal()
 }

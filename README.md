@@ -27,15 +27,15 @@ Every key is listed in [KEYBOARD_SHORTCUTS.md](KEYBOARD_SHORTCUTS.md).
 curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | sh
 ```
 
-This puts the latest release, one binary for Apple silicon and Intel Macs
-(macOS 11 or newer), in `~/.local/bin` and adds that folder to your PATH in
-`~/.zshrc`. Then it offers to set up [the launcher](#the-launcher): it
-installs kitty and Hammerspoon with Homebrew (and Homebrew itself if it's
-missing) and turns off Spotlight's ⌘Space shortcut. macOS asks you to open
-Hammerspoon, to let your terminal control it, and to allow it under
-Privacy & Security › Accessibility. The first index can make macOS ask whether
-your Desktop, Documents and Downloads may be read; allow it, or seekr won't find
-files there.
+This installs the latest release as `seekr.app` in `~/Applications`, one
+binary for Apple silicon and Intel Macs (macOS 11 or newer), links the `seekr`
+command into `~/.local/bin` and adds that folder to your PATH in `~/.zshrc`.
+Then it offers to set up [the launcher](#the-launcher): seekr.app runs in the
+background from then on, started at login, and the installer turns off
+Spotlight's ⌘Space shortcut. Nothing else gets installed and no permission is
+needed for the hotkey. The first index can make macOS ask whether your
+Desktop, Documents and Downloads may be read (once for your terminal, once
+for seekr.app); allow it, or seekr won't find files there.
 
 Run the same command again to upgrade. Options go after `sh -s --`:
 
@@ -49,14 +49,18 @@ curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | 
   later runs keep it.
 - `--version v1.2.1` installs that release instead of the latest.
 - `--uninstall` removes seekr, the launcher, the index and the settings, takes
-  `~/.local/bin` back off your PATH and gives ⌘Space back. kitty and
-  Hammerspoon stay installed.
+  `~/.local/bin` back off your PATH and gives ⌘Space back.
 
-From source, with Rust 1.85 or newer:
+Upgrading from 1.2.1 or older, which ran the launcher in kitty through
+Hammerspoon, retires that setup and keeps its hotkey. kitty and Hammerspoon
+stay installed; the installer says when nothing of yours used Hammerspoon.
+
+From source, with Rust 1.89 or newer:
 
 ```sh
 cargo install --path crates/seekr      # the binary, into ~/.cargo/bin
-contrib/install-launcher.sh            # optional: the ⌘Space launcher
+seekr app                              # the launcher, until you quit it
+contrib/package.sh                     # or seekr.app itself, for install.sh (SEEKR_ARCHIVE)
 ```
 
 ## Features
@@ -153,8 +157,8 @@ spotify daft punk` runs one from the shell.
 ### Calculator
 
 Type arithmetic and the answer is pinned above the results, selected. `⏎`
-copies it (the launcher then hides and hands focus back), `^y` copies it and
-stays, `↓` moves on to the files.
+copies it (the launcher then hides), `^y` copies it and stays, `↓` moves on
+to the files.
 
 It understands `+ - * / ^ %` (also `×`, `÷`, `**` and `3 x 4`), parentheses
 (`5(6+7)` and `(1+2)(3+4)` multiply, left to right like `*`), `1e3`,
@@ -186,35 +190,38 @@ very first lookup on a fresh Mac can come back empty.
 
 ### The launcher
 
-The installer (or `contrib/install-launcher.sh` in a checkout) binds ⌘Space,
-through Hammerspoon, to a seekr
-window without a title bar, centred on the screen and desktop you are working
-on. The first press starts it in about a second. After that seekr stays
-resident, and each press brings it back within a couple of frames, ready to
-type, while the index refreshes in the background.
+seekr.app puts the finder behind ⌘Space in every app: a window without a
+title bar, centred on the screen you are working on. It stays loaded between uses, so each press brings it back at once,
+ready to type, while the index refreshes in the background. Hidden, it uses no
+CPU at all.
 
-- `⏎` opens the selection and hides the window; the app you opened keeps the focus.
-- `esc` clears the query, then hides the window and hands focus back to where you were.
-- ⌘Space while seekr is in front hides it too, keeping the query: it comes
-  back selected, so typing replaces it and any other key carries on with it.
-- `^c` quits the resident seekr; the next ⌘Space starts a fresh one.
+- `⏎` opens the selection and hides the window; the app you opened has the focus.
+- `esc` clears the query, then hides the window. The app you were in never
+  lost the focus (its menu bar stays), so you are straight back in it.
+- ⌘Space while seekr is up hides it too, and so does clicking elsewhere,
+  keeping the query: it comes back selected, so typing replaces it and any
+  other key carries on with it.
+- `^c` hides the window as well. launchd restarts seekr.app if it is killed;
+  `launchctl bootout gui/$(id -u)/io.github.aarjav0210.seekr` stops it until
+  the next login, `--uninstall` for good.
 
 ⌘Space belongs to Spotlight, and on macOS 15 also to Siri when held, so the
 installer turns those two shortcuts off. Spotlight and Siri keep working;
 System Settings › Keyboard › Keyboard Shortcuts › Spotlight and System
 Settings › Siri turn the shortcuts back on. For another key, run the installer
-with `--hotkey ctrl+space` (or `contrib/install-launcher.sh --hotkey
-ctrl+space`): it gives ⌘Space back, and later runs keep the key you chose. When another app already holds
-the key as a shared hotkey, Hammerspoon watches for it with an event tap
-instead; the installer prints which of the two it uses.
+with `--hotkey ctrl+space`: it gives ⌘Space back, and later runs keep the key
+you chose (`defaults read io.github.aarjav0210.seekr hotkey`).
 
-The window is a kitty panel (it can appear on any desktop), started by
-Hammerspoon with `seekr --resident` and no shell in between, so `~/.zshrc`
-never slows it down. Hammerspoon shows and hides it with kitty's
-`--toggle-visibility` and tells seekr through signals: SIGUSR1 when it shows
-the window (seekr refreshes), SIGUSR2 when the hotkey hid it (seekr keeps the
-query). seekr asks Hammerspoon to hide the window after `⏎` or `esc`. The
-Lua and the kitty config live in `contrib/`.
+How it works: the hotkey is a Carbon hot key, which macOS delivers to seekr
+from any app without Accessibility permission. The window is a
+non-activating panel on every desktop, so the app in front keeps its place
+and gets the keyboard back by itself when the panel hides. The finder is the
+same one as in the terminal: its frames are drawn into a grid of cells that
+the window paints with the system's monospaced font, box-drawing characters
+drawn as lines, and SF Symbols for icons. launchd starts seekr.app at login
+and again if it ever crashes (`~/Library/LaunchAgents/io.github.aarjav0210.seekr.plist`);
+what it logs goes to `~/Library/Logs/seekr.log`. Opening seekr.app from Finder
+or Spotlight shows the window too.
 
 ## Command line
 
@@ -224,7 +231,7 @@ agents:
 ```sh
 seekr                              # the finder (also `seekr tui`)
 seekr app: whatsapp                # the finder, with a query
-seekr --resident                   # the finder that hides instead of quitting (for the launcher)
+seekr app                          # the launcher (what seekr.app runs); --hotkey ctrl+space, --show
 seekr search doc: offer letter     # one-shot search, printed as a table
 seekr search --json -n 5 cv        # … as JSON: [{item, score}]
 seekr search --all main            # include source files without `code:`
@@ -296,9 +303,10 @@ crates/seekr-core   library, no UI: items, query parser, providers (apps, places
                     calculator, definitions (macOS dictionary), doctor
 crates/seekr        the binary: CLI (main.rs, cli.rs), finder (tui/: state and
                     keys, query line, drawing, definition card), background
-                    loading, launcher glue (resident mode)
-contrib/            the ⌘Space launcher: Hammerspoon config, kitty config, installer;
-                    package.sh, which builds the release archive
+                    loading, and seekr.app (gui/: hotkey, window, painting the
+                    finder's frames, keys)
+contrib/            package.sh, which builds seekr.app and the release archive;
+                    macos/Info.plist
 install.sh          the curl installer: downloads a release, installs and uninstalls
 ```
 
@@ -308,7 +316,7 @@ unit tests; the dictionary test is skipped on a Mac without the dictionary.
 
 To release, bump `version` in `crates/seekr/Cargo.toml`, then push a matching
 tag: `git tag v0.2.0 && git push origin v0.2.0`.
-`.github/workflows/release.yml` tests, builds the universal binary with
+`.github/workflows/release.yml` tests, builds seekr.app with
 `contrib/package.sh` and publishes it as a GitHub release, which `install.sh`
 picks up as the latest.
 

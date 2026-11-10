@@ -383,7 +383,7 @@ fn draw_preview(f: &mut Frame, area: Rect, app: &App) {
     let lines = if let Some(m) = &app.app_search {
         app_search_details(m)
     } else if let Some(c) = app.selected_calc() {
-        calc_details(c, area.width.saturating_sub(2) as usize, app.resident)
+        calc_details(c, area.width.saturating_sub(2) as usize, app.in_window())
     } else if let Some(h) = app.selected_hit() {
         item_details(h, app)
     } else {
@@ -442,7 +442,7 @@ fn item_details(h: &Hit, app: &App) -> Vec<Line<'static>> {
     if let Some(s) = it.bundle_id.as_deref().and_then(|b| app.cfg.search_for_app(b)) {
         lines.push(hints(&[("⇥", &format!("search in {}", s.name()))]));
     }
-    let esc = if app.resident { "clear, then hide  " } else { "clear, then quit  " };
+    let esc = if app.in_window() { "clear, then hide  " } else { "clear, then quit  " };
     lines.extend([
         hints(&[("⏎", "open    "), ("^r", "reveal in Finder")]),
         hints(&[("^y", "copy path  "), ("^v", "quick look")]),
@@ -458,7 +458,7 @@ fn item_details(h: &Hit, app: &App) -> Vec<Line<'static>> {
 
 /// Details for the answer row: the expression, the answer in large digits
 /// when they fit, and what ⏎ does.
-fn calc_details(c: &Calculation, width: usize, resident: bool) -> Vec<Line<'static>> {
+fn calc_details(c: &Calculation, width: usize, in_window: bool) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled("Calculator", ACCENT)),
         Line::from(Span::styled(c.expr.clone(), DIM)),
@@ -475,8 +475,8 @@ fn calc_details(c: &Calculation, width: usize, resident: bool) -> Vec<Line<'stat
     lines.push(Line::from(""));
     lines.push(field("value", c.raw.clone()));
     lines.push(Line::from(""));
-    // In the launcher ⏎ also hides the window; ^y copies and stays.
-    lines.push(if resident {
+    // In the window ⏎ also hides it; ^y copies and stays.
+    lines.push(if in_window {
         hints(&[("⏎", "copy and hide  "), ("^y", "copy  "), ("↓", "results")])
     } else {
         hints(&[("⏎", "copy  "), ("↓", "results")])
@@ -531,7 +531,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Span::styled(" ready ", Style::new().fg(Color::Green))
     };
-    let esc = if app.resident { "esc clear/hide · ^c quit" } else { "esc clear/quit" };
+    let esc = if app.in_window() { "esc clear/hide" } else { "esc clear/quit" };
     let keys = if app.app_search.is_some() {
         format!("  ⏎ search · ^y copy url · ⌫ back · {esc}")
     } else if app.selected_calc().is_some() {
