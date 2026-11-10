@@ -104,13 +104,20 @@ end_resident() {
 }
 
 # (Re)start Hammerspoon so it picks up the config. The `hs` CLI is avoided on
-# purpose: Gatekeeper kills it while the app is still quarantined.
+# purpose: Gatekeeper kills it while the app is still quarantined. It is
+# opened by path: `open -a Hammerspoon` looks the name up in LaunchServices,
+# which has not heard of an app Homebrew moved into /Applications a moment
+# ago ("Unable to find application named 'Hammerspoon'"); opening the path
+# registers it, which the AppleScript calls after this rely on.
 restart_hammerspoon() {
   if pgrep -x Hammerspoon >/dev/null; then
     osascript -e 'tell application "Hammerspoon" to quit' >/dev/null 2>&1 || true
     sleep 1
   fi
-  open -a Hammerspoon
+  open /Applications/Hammerspoon.app || {
+    echo "could not start Hammerspoon; open /Applications/Hammerspoon.app, then run this again" >&2
+    exit 1
+  }
 }
 
 if [ -n "$UNINSTALL" ]; then
