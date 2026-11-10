@@ -993,7 +993,7 @@ mod tests {
         for w in ["a", "", "two words", "file.pdf", "~/x", "abc1", "-ab", "ab-", "a--b", "x_y"] {
             assert!(!is_word(w), "{w}");
         }
-        let q = |s: &str| Query::parse_with(s, &crate::AppSearch::builtin());
+        let q = |s: &str| Query::parse_with(s, &crate::app_search::fixture());
         assert_eq!(word_for_query(&q("serendipity")), Some("serendipity"));
         assert_eq!(word_for_query(&q("  notes ")), Some("notes"));
         assert_eq!(word_for_query(&q("app: notes")), None);

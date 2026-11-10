@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn leading_keyword_hands_the_rest_to_the_app_verbatim() {
-        let q = Query::parse_with("arc: how to in:Downloads ext:pdf ", &AppSearch::builtin());
+        let q = Query::parse_with("arc: how to in:Downloads ext:pdf ", &app_search::fixture());
         assert_eq!(keyword(&q), Some("arc"));
         assert_eq!(q.terms, "how to in:Downloads ext:pdf ");
         assert!(q.scope.is_none() && q.in_dir.is_none() && q.ext.is_none());
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn keyword_is_case_insensitive_and_may_touch_the_terms() {
-        let all = AppSearch::builtin();
+        let all = app_search::fixture();
         let q = Query::parse_with("Spotify:daft punk", &all);
         assert_eq!(keyword(&q), Some("spotify"));
         assert_eq!(q.terms, "daft punk");
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn keyword_only_counts_at_the_start() {
-        let q = Query::parse_with("notes arc: foo", &AppSearch::builtin());
+        let q = Query::parse_with("notes arc: foo", &app_search::fixture());
         assert!(q.app_search.is_none());
         assert_eq!(q.terms, "notes arc: foo");
         // Without a search list (one-shot CLI) the prefix is just a term, as before.
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn scope_and_filter_words_win_over_keywords() {
-        let mut all = AppSearch::builtin();
+        let mut all = app_search::fixture();
         for k in ["doc", "in"] {
             all.push(AppSearch {
                 keyword: k.into(),
