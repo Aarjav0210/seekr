@@ -6,8 +6,7 @@ use seekr_core::actions::{self, Action};
 use seekr_core::define::{self, Sense};
 use seekr_core::providers::apps;
 use seekr_core::search::kinds_for_query;
-use seekr_core::{calc, doctor, indexer, AppSearch, Config, Index, Item, Kind, Query, Searcher};
-use std::collections::HashSet;
+use seekr_core::{calc, doctor, indexer, Config, Index, Item, Kind, Query, Searcher};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -208,38 +207,38 @@ pub fn kinds(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The configured app searches, and whether their apps are installed.
+/// The configured app searches, and whether their apps are installed. Those
+/// whose app is missing are listed last; Tab does nothing special for them.
 pub fn searches(json: bool) -> Result<()> {
     let cfg = Config::load()?;
-    let installed: HashSet<String> = apps::scan_app_dirs(&cfg)
-        .into_iter()
-        .filter_map(|a| a.bundle_id)
-        .collect();
+    let rows = cfg
+        .searches
+        .iter()
+        .map(|s| (s, true))
+        .chain(cfg.unavailable.iter().map(|s| (s, false)));
     if json {
-        let v: Vec<_> = cfg
-            .searches
-            .iter()
-            .map(|s| {
+        let v: Vec<_> = rows
+            .map(|(s, installed)| {
                 serde_json::json!({
                     "keyword": s.keyword,
                     "name": s.name(),
                     "url": s.url,
                     "app": s.app,
-                    "installed": s.app.as_ref().map(|b| installed.contains(b)),
+                    "installed": s.app.as_ref().map(|_| installed),
                 })
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let status = |s: &AppSearch| match &s.app {
-        Some(b) if installed.contains(b) => "installed",
-        Some(_) => "not installed",
-        None => "web",
-    };
-    println!("{:<10} {:<10} {:<14} {}", "keyword", "name", "app", "url");
-    for s in &cfg.searches {
-        println!("{:<10} {:<10} {:<14} {}", s.keyword, s.name(), status(s), s.url);
+    println!("{:<10} {:<16} {:<14} {}", "keyword", "name", "app", "url");
+    for (s, installed) in rows {
+        let status = match (&s.app, installed) {
+            (None, _) => "web",
+            (Some(_), true) => "installed",
+            (Some(_), false) => "not installed",
+        };
+        println!("{:<10} {:<16} {:<14} {}", s.keyword, s.name(), status, s.url);
     }
     println!("\nfinder: select the app (or type its keyword) and press ⇥; shell: seekr search-in <keyword> <terms>");
     println!("config: {} ([[searches]])", Config::config_path().display());
@@ -251,6 +250,9 @@ pub fn searches(json: bool) -> Result<()> {
 pub fn search_in(keyword: &str, terms: &str, print: bool, json: bool) -> Result<()> {
     let cfg = Config::load()?;
     let Some(s) = cfg.search_by_keyword(keyword) else {
+        if let Some(s) = seekr_core::app_search::by_keyword(&cfg.unavailable, keyword) {
+            bail!("{} is not installed, so the {keyword:?} search is off", s.name());
+        }
         bail!("no app search named {keyword:?}; `seekr searches` lists them");
     };
     let terms = terms.trim();
