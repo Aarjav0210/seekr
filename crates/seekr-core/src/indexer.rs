@@ -2,7 +2,7 @@
 use crate::config::Config;
 use crate::index::Index;
 use crate::item::Item;
-use crate::providers::{apps, files, places};
+use crate::providers::{apps, files, places, settings};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -13,11 +13,14 @@ pub const SOURCE_APPS: &str = "apps";
 pub const SOURCE_LSREGISTER: &str = "lsregister";
 pub const SOURCE_WALK: &str = "walk";
 pub const SOURCE_PLACES: &str = "places";
+pub const SOURCE_SETTINGS: &str = "settings";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexReport {
     pub apps: usize,
     pub lsregister_apps: usize,
+    /// System Settings panes.
+    pub settings: usize,
     /// Well-known folders and the roots themselves.
     pub places: usize,
     pub files: usize,
@@ -43,6 +46,13 @@ pub fn reindex(
     }
     report.apps = app_items.len();
     idx.replace_items(SOURCE_APPS, &app_items)?;
+
+    let setting_items = settings::scan();
+    for it in &setting_items {
+        on_item(it);
+    }
+    report.settings = setting_items.len();
+    idx.replace_items(SOURCE_SETTINGS, &setting_items)?;
 
     if full {
         let ls = apps::scan_launch_services()?;
@@ -108,8 +118,9 @@ impl RefreshReport {
     }
 }
 
-/// Incrementally bring the index up to date: re-scan apps and re-walk the roots,
-/// then write only the difference (new, changed, vanished items) to the database.
+/// Incrementally bring the index up to date: re-scan apps and settings panes
+/// and re-walk the roots, then write only the difference (new, changed,
+/// vanished items) to the database.
 ///
 /// `apps` is the live application scan (callers usually already have it).
 /// `on_new` sees every item that was not previously indexed, as it is found.
@@ -149,6 +160,13 @@ pub fn refresh(
         classify(a, &mut app_added, &mut app_updated, &mut seen);
     }
 
+    let setting_items = settings::scan();
+    let mut setting_added = Vec::new();
+    let mut setting_updated = Vec::new();
+    for s in &setting_items {
+        classify(s, &mut setting_added, &mut setting_updated, &mut seen);
+    }
+
     let place_items = places::scan(cfg);
     let place_paths: HashSet<PathBuf> = place_items.iter().map(|i| i.path.clone()).collect();
     let mut place_added = Vec::new();
@@ -167,11 +185,12 @@ pub fn refresh(
         }
         classify(&it, &mut walk_added, &mut walk_updated, &mut seen);
     });
-    report.scanned = apps.len() + place_items.len() + stats.files + stats.folders - skipped;
+    report.scanned =
+        apps.len() + setting_items.len() + place_items.len() + stats.files + stats.folders - skipped;
 
-    // Anything cached under a scanned location, or at a place's path, that we did
-    // not see has vanished. Items outside the scanned locations (e.g. apps found
-    // via LaunchServices) are kept.
+    // Anything cached under a scanned location, at a place's path, or that is a
+    // settings pane, that we did not see has vanished. Items outside the scanned
+    // locations (e.g. apps found via LaunchServices) are kept.
     let scopes: Vec<PathBuf> = cfg
         .root_paths()
         .into_iter()
@@ -182,19 +201,24 @@ pub fn refresh(
         .keys()
         .filter(|p| {
             !seen.contains(*p)
-                && (scopes.iter().any(|s| p.starts_with(s)) || place_candidates.contains(*p))
+                && (scopes.iter().any(|s| p.starts_with(s))
+                    || place_candidates.contains(*p)
+                    || p.to_string_lossy().starts_with(settings::URL_PREFIX))
         })
         .cloned()
         .collect();
 
-    report.added = app_added.len() + place_added.len() + walk_added.len();
-    report.updated = app_updated.len() + place_updated.len() + walk_updated.len();
+    report.added = app_added.len() + setting_added.len() + place_added.len() + walk_added.len();
+    report.updated =
+        app_updated.len() + setting_updated.len() + place_updated.len() + walk_updated.len();
     report.removed = removed.len();
 
     app_added.extend(app_updated);
+    setting_added.extend(setting_updated);
     place_added.extend(place_updated);
     walk_added.extend(walk_updated);
     idx.upsert_items(SOURCE_APPS, &app_added)?;
+    idx.upsert_items(SOURCE_SETTINGS, &setting_added)?;
     idx.upsert_items(SOURCE_PLACES, &place_added)?;
     idx.upsert_items(SOURCE_WALK, &walk_added)?;
     idx.delete_paths(&removed)?;
@@ -247,14 +271,16 @@ mod tests {
         assert!(item_at(&idx, &tmp.join("Outer")).is_none());
 
         let places = places::scan(&cfg);
+        // The settings panes of the Mac running the tests are new too.
+        let panes = settings::scan().len();
         let r = refresh(&cfg, &mut idx, &[], |_| {}).unwrap();
-        assert_eq!(r.added, places.len() - 1, "every place but the cached Inner is new");
+        assert_eq!(r.added, places.len() - 1 + panes, "every place but the cached Inner is new");
         assert_eq!(r.removed, 0);
         for p in &places {
             assert!(item_at(&idx, &p.path).unwrap().is_place(), "{}", p.path.display());
         }
         let distinct: HashSet<_> = walked.iter().map(|i| &i.path).collect();
-        assert_eq!(idx.count().unwrap(), distinct.len() + places.len() - 1);
+        assert_eq!(idx.count().unwrap(), distinct.len() + places.len() - 1 + panes);
 
         let again = refresh(&cfg, &mut idx, &[], |_| {}).unwrap();
         assert_eq!((again.added, again.removed), (0, 0));
@@ -272,9 +298,10 @@ mod tests {
         let (tmp, cfg, mut idx) = setup("reindex-places");
         let r = reindex(&cfg, &mut idx, false, |_| {}).unwrap();
         assert_eq!(r.places, places::scan(&cfg).len());
+        assert_eq!(r.settings, settings::scan().len());
         // Inner is walked as part of Outer too, but stored once, as a place;
-        // besides the places only a.txt, b.txt and sub remain.
-        assert_eq!(idx.count().unwrap(), r.places + 3);
+        // besides the places and the settings panes only a.txt, b.txt and sub remain.
+        assert_eq!(idx.count().unwrap(), r.places + r.settings + 3);
         for root in ["Outer", "Outer/Inner", "Solo"] {
             assert!(item_at(&idx, &tmp.join(root)).unwrap().is_place(), "{root}");
         }

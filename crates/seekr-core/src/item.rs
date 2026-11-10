@@ -15,11 +15,14 @@ pub enum Kind {
     Archive,
     Code,
     File,
+    /// A System Settings pane (`mouse` → System Settings › Mouse).
+    Setting,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 10] = [
         Kind::App,
+        Kind::Setting,
         Kind::Doc,
         Kind::Folder,
         Kind::Image,
@@ -42,6 +45,7 @@ impl Kind {
             Kind::Archive => "archive",
             Kind::Code => "code",
             Kind::File => "file",
+            Kind::Setting => "setting",
         }
     }
 
@@ -56,6 +60,7 @@ impl Kind {
             Kind::Archive => "Archive",
             Kind::Code => "Source file",
             Kind::File => "File",
+            Kind::Setting => "Settings pane",
         }
     }
 
@@ -70,6 +75,7 @@ impl Kind {
             Kind::Archive => "",
             Kind::Code => "",
             Kind::File => "",
+            Kind::Setting => "",
         }
     }
 
@@ -85,6 +91,7 @@ impl Kind {
             "zip" | "archive" | "archives" => Kind::Archive,
             "code" | "src" | "source" => Kind::Code,
             "file" | "files" => Kind::File,
+            "setting" | "settings" | "pref" | "prefs" | "preference" | "preferences" => Kind::Setting,
             _ => return None,
         })
     }
@@ -98,6 +105,7 @@ impl Kind {
     pub fn base_boost(self) -> f32 {
         match self {
             Kind::App => 1.6,
+            Kind::Setting => 1.3,
             Kind::Doc => 1.2,
             Kind::Folder => 1.15,
             Kind::Image | Kind::Video | Kind::Audio => 1.0,
@@ -238,6 +246,11 @@ impl Item {
         self.flags & FLAG_PLACE != 0
     }
 
+    /// A System Settings pane; its path is the `x-apple.systempreferences:` URL that opens it.
+    pub fn is_setting(&self) -> bool {
+        self.kind == Kind::Setting
+    }
+
     /// Text the fuzzy matcher sees for the primary column: name plus alt name.
     pub fn search_text(&self) -> String {
         match &self.alt {
@@ -251,8 +264,11 @@ impl Item {
         tilde(&self.path)
     }
 
-    /// Parent directory with `~` collapsed.
+    /// Parent directory with `~` collapsed; for a settings pane, "System Settings".
     pub fn parent_display(&self) -> String {
+        if self.is_setting() {
+            return crate::providers::settings::LOCATION.to_string();
+        }
         self.path.parent().map(tilde).unwrap_or_default()
     }
 

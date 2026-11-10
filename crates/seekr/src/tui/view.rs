@@ -327,7 +327,7 @@ fn draw_home(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(Paragraph::new(Line::from(spans)), at);
     }
     let mut hints = vec![
-        keyed(&["type to find apps, documents, folders and media, or ", "2+2"]),
+        keyed(&["type to find apps, settings, documents, folders and media, or ", "2+2"]),
         keyed(&[
             "", "app:", " ", "doc:", " ", "dir:", " scope · ", "in:", "Downloads · ", "ext:", "pdf · ",
             "⇥", " cycles scope",
@@ -430,25 +430,37 @@ fn item_details(h: &Hit, app: &App) -> Vec<Line<'static>> {
         lines.push(field("also", alt.clone()));
     }
     lines.push(field("kind", it.kind.label()));
-    lines.push(field("path", it.path_display()));
-    if it.kind != Kind::App && it.kind != Kind::Folder {
-        lines.push(field("size", human_size(it.size)));
-    }
-    lines.push(field("edited", relative_time(it.modified, seekr_core::now_secs())));
-    if let Some(b) = &it.bundle_id {
-        lines.push(field("bundle", b.clone()));
-    }
-    lines.push(Line::from(""));
-    if let Some(s) = it.bundle_id.as_deref().and_then(|b| app.cfg.search_for_app(b)) {
-        lines.push(hints(&[("⇥", &format!("search in {}", s.name()))]));
-    }
     let esc = if app.resident { "clear, then hide  " } else { "clear, then quit  " };
-    lines.extend([
-        hints(&[("⏎", "open    "), ("^r", "reveal in Finder")]),
-        hints(&[("^y", "copy path  "), ("^v", "quick look")]),
-        hints(&[("^e", "open folder  "), ("^x", "refresh index")]),
-        hints(&[("esc", esc), ("^u", "clear  "), ("^w ⌥⌫", "delete word")]),
-    ]);
+    if it.is_setting() {
+        // A pane: where it is in System Settings and the URL that opens it.
+        lines.push(field("in", format!("System Settings › {}", it.name)));
+        lines.push(field("url", it.path_display()));
+        lines.push(Line::from(""));
+        lines.extend([
+            hints(&[("⏎", "open in System Settings")]),
+            hints(&[("^y", "copy url  "), ("^r", "reveal System Settings")]),
+            hints(&[("esc", esc), ("^u", "clear  "), ("^w ⌥⌫", "delete word")]),
+        ]);
+    } else {
+        lines.push(field("path", it.path_display()));
+        if it.kind != Kind::App && it.kind != Kind::Folder {
+            lines.push(field("size", human_size(it.size)));
+        }
+        lines.push(field("edited", relative_time(it.modified, seekr_core::now_secs())));
+        if let Some(b) = &it.bundle_id {
+            lines.push(field("bundle", b.clone()));
+        }
+        lines.push(Line::from(""));
+        if let Some(s) = it.bundle_id.as_deref().and_then(|b| app.cfg.search_for_app(b)) {
+            lines.push(hints(&[("⇥", &format!("search in {}", s.name()))]));
+        }
+        lines.extend([
+            hints(&[("⏎", "open    "), ("^r", "reveal in Finder")]),
+            hints(&[("^y", "copy path  "), ("^v", "quick look")]),
+            hints(&[("^e", "open folder  "), ("^x", "refresh index")]),
+            hints(&[("esc", esc), ("^u", "clear  "), ("^w ⌥⌫", "delete word")]),
+        ]);
+    }
     if std::env::var_os("SEEKR_DEBUG").is_some() {
         lines.push(Line::from(""));
         lines.push(field("score", format!("{:.1}", h.score)));
@@ -554,6 +566,7 @@ fn kind_color(k: Kind) -> Color {
         Kind::Archive => Color::DarkGray,
         Kind::Code => Color::Gray,
         Kind::File => Color::White,
+        Kind::Setting => Color::LightBlue,
     }
 }
 

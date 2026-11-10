@@ -41,8 +41,16 @@ const PLACE_BOOST: f32 = 1.5;
 /// Weight on an app named exactly what was typed, keeping it ahead of a
 /// same-named place: `music` puts Music.app first, then ~/Music.
 const EXACT_APP_BOOST: f32 = 1.2;
-/// Shortest query that counts as naming a place.
+/// Shortest query that counts as naming a place or a settings pane.
 const PLACE_MIN_PREFIX: usize = 2;
+/// Weight on a settings pane named exactly what was typed (or one of its
+/// extra words: `dark mode`), lifting it above apps that merely start with
+/// it, but not above an app of that exact name.
+const EXACT_SETTING_BOOST: f32 = 1.35;
+/// Weight on a settings pane whose name starts with the query: ahead of
+/// documents and folders, still behind an app that starts with it too
+/// (`key`: Keynote, then Keyboard).
+const SETTING_PREFIX_BOOST: f32 = 1.2;
 
 fn fill(item: &Item, cols: &mut [Utf32String]) {
     cols[0] = Utf32String::from(item.search_text().as_str());
@@ -240,17 +248,22 @@ impl Searcher {
 }
 
 /// `base`, the fuzzy score, times the item's weights: its kind (unless the
-/// query is scoped), a boost when `terms` name a place or exactly an app, and
-/// penalties for deep paths and for source trees.
+/// query is scoped), a boost when `terms` name a place, a settings pane or
+/// exactly an app, and penalties for deep paths and for source trees.
 fn weigh(base: f32, item: &Item, query: &Query, terms: &str) -> f32 {
     let mut kind_mult = if query.scope.is_some() { 1.0 } else { item.kind.base_boost() };
-    let names_place = terms.chars().count() >= PLACE_MIN_PREFIX
-        && item.is_place()
-        && name_matches(item, |n| n.starts_with(terms));
+    let named = terms.chars().count() >= PLACE_MIN_PREFIX;
+    let names_place = named && item.is_place() && name_matches(item, |n| n.starts_with(terms));
     if names_place {
         kind_mult *= PLACE_BOOST;
     } else if item.kind == Kind::App && name_matches(item, |n| n == terms) {
         kind_mult *= EXACT_APP_BOOST;
+    } else if named && item.is_setting() {
+        if item.name.to_lowercase() == terms || setting_words(item).any(|w| w == terms) {
+            kind_mult *= EXACT_SETTING_BOOST;
+        } else if item.name.to_lowercase().starts_with(terms) {
+            kind_mult *= SETTING_PREFIX_BOOST;
+        }
     }
     let depth_pen = 1.0 - 0.015 * (item.depth().saturating_sub(3).min(10) as f32);
     // Source trees are noise unless you asked for code.
@@ -260,6 +273,16 @@ fn weigh(base: f32, item: &Item, query: &Query, terms: &str) -> f32 {
         1.0
     };
     base * kind_mult * depth_pen * repo_pen
+}
+
+/// A settings pane's extra words (`dark mode, accent colour`), lowercased.
+fn setting_words(item: &Item) -> impl Iterator<Item = String> + '_ {
+    item.alt
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
 }
 
 /// Whether the item's name or alt name, lowercased, satisfies `pred`.
@@ -383,6 +406,79 @@ mod tests {
         );
         assert_eq!(top(&mut s, "safari", 1), ["app /Applications/Safari.app"]);
         assert_eq!(top(&mut s, "notes", 1), ["app /Applications/Notes.app"]);
+    }
+
+    fn searcher_with_settings() -> Searcher {
+        let s = searcher_with_places();
+        for app in ["Keynote", "DisplayLink Manager", "Monitor Control", "Sound Source", "System Settings"] {
+            s.push(Item::new(Kind::App, app, format!("/Applications/{app}.app")));
+        }
+        for id in [
+            "com.apple.Mouse-Settings.extension",
+            "com.apple.Keyboard-Settings.extension",
+            "com.apple.Displays-Settings.extension",
+            "com.apple.Sound-Settings.extension",
+            "com.apple.Appearance-Settings.extension",
+            "com.apple.Desktop-Settings.extension",
+        ] {
+            s.push(crate::providers::settings::item(id).unwrap());
+        }
+        for (kind, name, path) in [
+            (Kind::Doc, "mouse notes.md", "/Users/jdoe/Documents/mouse notes.md"),
+            (Kind::Folder, "Mouse", "/Users/jdoe/Documents/Mouse"),
+            (Kind::Image, "keyboard.png", "/Users/jdoe/Pictures/keyboard.png"),
+            (Kind::Doc, "Dark Mode.pdf", "/Users/jdoe/Documents/Dark Mode.pdf"),
+        ] {
+            s.push(Item::new(kind, name, path));
+        }
+        s
+    }
+
+    #[test]
+    fn a_settings_pane_is_found_by_its_name_or_its_words() {
+        let mut s = searcher_with_settings();
+        let mouse = "setting x-apple.systempreferences:com.apple.Mouse-Settings.extension";
+        for q in ["mouse", "Mouse", "mou"] {
+            assert_eq!(top(&mut s, q, 1), [mouse], "{q}");
+        }
+        assert_eq!(
+            top(&mut s, "dark mode", 1),
+            ["setting x-apple.systempreferences:com.apple.Appearance-Settings.extension"]
+        );
+        assert_eq!(
+            top(&mut s, "dock", 1),
+            ["setting x-apple.systempreferences:com.apple.Desktop-Settings.extension"]
+        );
+        // Scoped, and spelt the other ways.
+        for q in ["setting: mouse", "settings: mouse", "prefs: mouse"] {
+            assert_eq!(top(&mut s, q, 1), [mouse], "{q}");
+        }
+        assert!(top(&mut s, "settings:", 20).iter().all(|r| r.starts_with("setting ")));
+    }
+
+    #[test]
+    fn apps_still_come_before_a_pane_they_share_a_prefix_with() {
+        let mut s = searcher_with_settings();
+        assert_eq!(
+            top(&mut s, "key", 2),
+            [
+                "app /Applications/Keynote.app",
+                "setting x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+            ]
+        );
+        assert_eq!(
+            top(&mut s, "keyb", 1),
+            ["setting x-apple.systempreferences:com.apple.Keyboard-Settings.extension"]
+        );
+        // Named in full, the pane beats apps that merely start with the word.
+        assert_eq!(
+            top(&mut s, "sound", 2),
+            [
+                "setting x-apple.systempreferences:com.apple.Sound-Settings.extension",
+                "app /Applications/Sound Source.app"
+            ]
+        );
+        assert_eq!(top(&mut s, "settings", 1), ["app /Applications/System Settings.app"]);
     }
 
     #[test]

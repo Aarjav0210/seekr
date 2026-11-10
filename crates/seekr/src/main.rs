@@ -85,6 +85,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List the System Settings panes the finder opens (`mouse` → System Settings › Mouse).
+    Settings {
+        #[arg(long)]
+        json: bool,
+    },
     /// Define a word with the macOS dictionary (offline). Exits non-zero when there is no entry.
     Define {
         word: String,
@@ -134,6 +139,7 @@ fn main() -> Result<()> {
         Some(Cmd::Doctor { json }) => cli::doctor(json),
         Some(Cmd::Kinds { json }) => cli::kinds(json),
         Some(Cmd::Searches { json }) => cli::searches(json),
+        Some(Cmd::Settings { json }) => cli::settings(json),
         Some(Cmd::Define { word, json }) => cli::define(&word, json),
         Some(Cmd::SearchIn {
             keyword,

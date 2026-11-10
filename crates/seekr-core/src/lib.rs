@@ -3,7 +3,7 @@
 //! Everything a front-end (TUI, CLI, or an AI agent via MCP) needs lives here:
 //! - [`item::Item`] / [`item::Kind`]: the things you can find.
 //! - [`query::Query`]: the tiny query language (`app: whatsapp`, `doc: offer letter`, `in:Downloads`, `ext:pdf`).
-//! - [`providers`]: sources of items (application bundles, well-known places, files on disk).
+//! - [`providers`]: sources of items (application bundles, System Settings panes, well-known places, files on disk).
 //! - [`index::Index`]: SQLite-backed persistent index + usage (frecency) log.
 //! - [`search::Searcher`]: incremental fuzzy matching (nucleo) with kind/frecency-aware re-ranking.
 //! - [`actions`]: open / reveal / copy, the primitive "tools".

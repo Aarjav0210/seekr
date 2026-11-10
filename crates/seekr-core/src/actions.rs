@@ -2,6 +2,7 @@
 use crate::app_search::AppSearch;
 use crate::index::{Index, Usage};
 use crate::item::Item;
+use crate::providers::settings;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -84,13 +85,18 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
 }
 
 /// Perform `action` on `item`, recording usage in `idx` when appropriate.
+///
+/// A settings pane's path is the URL that opens it, which `open` understands;
+/// revealing one shows System Settings itself, and it has no Quick Look.
 pub fn perform(action: Action, item: &Item, idx: Option<&Index>) -> Result<Option<Usage>> {
-    match action {
-        Action::Open => open(&item.path)?,
-        Action::Reveal => reveal(&item.path)?,
-        Action::CopyPath => copy_to_clipboard(&item.path.to_string_lossy())?,
-        Action::OpenParent => open_parent(&item.path)?,
-        Action::QuickLook => quick_look(&item.path)?,
+    match (action, item.is_setting()) {
+        (Action::Open, _) => open(&item.path)?,
+        (Action::CopyPath, _) => copy_to_clipboard(&item.path.to_string_lossy())?,
+        (Action::Reveal | Action::OpenParent, true) => reveal(Path::new(settings::SYSTEM_SETTINGS_APP))?,
+        (Action::QuickLook, true) => bail!("a settings pane has no preview"),
+        (Action::Reveal, false) => reveal(&item.path)?,
+        (Action::OpenParent, false) => open_parent(&item.path)?,
+        (Action::QuickLook, false) => quick_look(&item.path)?,
     }
     if action.counts_as_use() {
         if let Some(idx) = idx {
