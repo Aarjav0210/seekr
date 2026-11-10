@@ -1,5 +1,5 @@
 # Publishes a GitHub release for every v* tag: the archive install.sh downloads
-# (a universal binary, the launcher files, the docs) and its checksum. The tag
+# (seekr.app with its universal binary, and the docs) and its checksum. The tag
 # must match the version in crates/seekr/Cargo.toml:
 #
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -38,14 +38,18 @@ jobs:
       - name: Package
         run: contrib/package.sh
 
-      - name: Smoke-test the packaged binary
+      - name: Smoke-test the packaged app
         run: |
           tar -xzf dist/seekr-macos-universal.tar.gz -C "$RUNNER_TEMP"
-          bin="$RUNNER_TEMP/seekr/seekr"
+          app="$RUNNER_TEMP/seekr/seekr.app"
+          bin="$app/Contents/MacOS/seekr"
           lipo -archs "$bin" | grep -q x86_64
           lipo -archs "$bin" | grep -q arm64
+          codesign --verify --strict "$app"
+          test "$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
           "$bin" --version
           test "$("$bin" calc '5(6+7)')" = 65
+          "$bin" app --hotkey cmd+space --check
 
       - name: Publish
         env:

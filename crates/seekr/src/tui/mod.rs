@@ -1,5 +1,7 @@
 //! Interactive fuzzy finder: the state behind the screen and the keys that
-//! change it. Every binding is listed in KEYBOARD_SHORTCUTS.md.
+//! change it. Every binding is listed in KEYBOARD_SHORTCUTS.md. It runs in a
+//! terminal ([`run`]) or in seekr.app's window (`crate::gui`), which draws the
+//! same frames itself.
 //!
 //! - [`query_line`]: the query as a text field.
 //! - [`view`]: drawing.
@@ -8,25 +10,23 @@ mod definition;
 mod query_line;
 mod view;
 
-use crate::launcher;
 use crate::loader::{self, LoadOpts, Progress, Seen};
 use anyhow::{bail, Result};
 use definition::DictLookup;
 use query_line::{Edit, QueryLine};
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
 };
+pub use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::SetTitle;
 use ratatui::widgets::ListState;
+use ratatui::Frame;
 use seekr_core::actions::{self, Action};
 use seekr_core::calc::{self, Calculation};
 use seekr_core::define::{self, Definition};
 use seekr_core::{AppSearch, Config, Hit, Index, Item, Kind, Query, Searcher};
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,9 +38,16 @@ const PAGE: usize = 10;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 /// Skip the wake-up refresh if one ran this recently.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
-/// How long the event loop gets to act on SIGTERM or SIGHUP before the process
-/// ends without it.
-const TERMINATE_GRACE: Duration = Duration::from_millis(500);
+
+/// What the finder runs in, which decides what dismissing it does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Host {
+    /// A terminal: ⏎ and esc end the program.
+    Terminal,
+    /// seekr.app's window: ⏎ and esc hide it, and the finder waits, loaded,
+    /// for the next hotkey press.
+    Window,
+}
 
 /// App-search mode (`arc: rust lifetimes`): the rest of the query goes to an
 /// app instead of being matched against the index.
@@ -53,44 +60,7 @@ struct AppSearchMode {
     app: Option<Item>,
 }
 
-/// Flags the launcher's signals set (resident mode); the event loop reads them.
-#[derive(Default)]
-struct Signals {
-    /// SIGUSR1: the launcher revealed the window.
-    wake: Arc<AtomicBool>,
-    /// SIGUSR2: the launcher hid the window itself (the hotkey while seekr had focus).
-    park: Arc<AtomicBool>,
-    /// SIGTERM, SIGHUP: quit, still restoring the terminal and cleaning up.
-    terminate: Arc<AtomicBool>,
-}
-
-impl Signals {
-    fn register(&self) -> Result<()> {
-        use signal_hook::consts::{SIGHUP, SIGTERM, SIGUSR1, SIGUSR2};
-        use signal_hook::flag::register;
-        register(SIGUSR1, self.wake.clone())?;
-        register(SIGUSR2, self.park.clone())?;
-        register(SIGTERM, self.terminate.clone())?;
-        register(SIGHUP, self.terminate.clone())?;
-        // The event loop may never get to read that flag: when the terminal
-        // goes away (kitty crashed, Hammerspoon reloaded) crossterm's poll
-        // stops returning, looping on a read that yields nothing, and without
-        // this the process burns a core until someone sends SIGKILL.
-        let mut ending = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP])?;
-        std::thread::Builder::new()
-            .name("seekr-terminate".into())
-            .spawn(move || {
-                if ending.forever().next().is_some() {
-                    std::thread::sleep(TERMINATE_GRACE);
-                    launcher::clear_state();
-                    std::process::exit(1);
-                }
-            })?;
-        Ok(())
-    }
-}
-
-struct App {
+pub struct App {
     cfg: Config,
     idx: Index,
     searcher: Searcher,
@@ -106,14 +76,13 @@ struct App {
     dirty: bool,
     quit: bool,
     last_indexed: Option<i64>,
-    /// Resident mode: Enter/Esc hide the window (via Hammerspoon) instead of quitting.
-    resident: bool,
-    /// Parked by the launcher; nothing is drawn until the next wake-up.
+    host: Host,
+    /// The window is away (dismissed, or the hotkey hid it); the next hotkey
+    /// press brings it back. Never set in a terminal.
     hidden: bool,
-    /// Draw one more frame after dismissing, so the window shows a clean slate when revealed.
-    final_draw: bool,
-    signals: Signals,
     last_refresh: Instant,
+    /// The matcher was still busy at the last tick.
+    was_running: bool,
     /// Set while the query starts with an app-search keyword (`arc: …`).
     app_search: Option<AppSearchMode>,
     /// The query is a calculation: its answer is pinned above the hits, as row 0.
@@ -122,68 +91,41 @@ struct App {
     dict: DictLookup,
 }
 
-pub fn run(initial: String, resident: bool) -> Result<()> {
+pub fn run(initial: String) -> Result<()> {
     if !std::io::stdout().is_terminal() {
         bail!("seekr's interactive UI needs a terminal; try `seekr search <query>`");
     }
-    let mut app = App::new(Config::load()?, Index::open_default()?, resident)?;
+    let mut app = App::new(Host::Terminal)?;
     app.set_input(initial);
-    if resident {
-        app.signals.register()?;
-        launcher::write_state();
-    }
 
     let mut terminal = ratatui::init();
-    if resident {
-        // The launcher finds its window by process, but window lists show the title.
-        let _ = execute!(std::io::stdout(), SetTitle("seekr"));
-    }
     // Own the mouse: otherwise the wheel scrolls the terminal's own buffer and
     // the UI slides out of view. Wheel events move the selection instead.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = event_loop(&mut terminal, &mut app);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
-    if resident {
-        launcher::clear_state();
-    }
     res
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
-    let mut was_running = false;
-    while !app.quit && !app.signals.terminate.load(Ordering::Acquire) {
-        if app.signals.park.swap(false, Ordering::AcqRel) {
-            app.parked();
-        }
-        if app.signals.wake.swap(false, Ordering::AcqRel) {
-            app.wake_up();
-        }
-        if !app.hidden || app.final_draw {
-            terminal.draw(|f| view::draw(f, app))?;
-            app.final_draw = false;
-        }
-        // Parked windows get no input; idle slowly to stay off the CPU.
-        let wait = if app.hidden { 50 } else { 16 };
-        if event::poll(Duration::from_millis(wait))? {
+    while !app.quit {
+        terminal.draw(|f| app.draw(f))?;
+        if event::poll(Duration::from_millis(16))? {
             app.handle_event(event::read()?);
         }
-        let st = app.searcher.tick(10);
-        if st.changed || app.dirty || (was_running && !st.running) {
-            app.refresh_results();
-        }
-        was_running = st.running;
-        app.announce_refreshes();
-        app.dict.poll();
-        if app.status.as_ref().is_some_and(|(_, t)| t.elapsed() > STATUS_TTL) {
-            app.status = None;
-        }
+        app.tick();
     }
     Ok(())
 }
 
 impl App {
-    fn new(cfg: Config, idx: Index, resident: bool) -> Result<App> {
+    /// The finder with the user's config and index; loading starts in the background.
+    pub fn new(host: Host) -> Result<App> {
+        App::with(Config::load()?, Index::open_default()?, host)
+    }
+
+    fn with(cfg: Config, idx: Index, host: Host) -> Result<App> {
         let recent = idx
             .recent_items(100)?
             .into_iter()
@@ -205,17 +147,61 @@ impl App {
             status: None,
             dirty: true,
             quit: false,
-            resident,
+            host,
             hidden: false,
-            final_draw: false,
-            signals: Signals::default(),
             last_refresh: Instant::now(),
+            was_running: false,
             app_search: None,
             calc: None,
             dict: DictLookup::spawn(),
         };
         app.spawn_loader(app.cfg.eager_kinds(), app.cfg.refresh_on_launch);
         Ok(app)
+    }
+
+    pub fn draw(&mut self, f: &mut Frame) {
+        view::draw(f, self);
+    }
+
+    /// The work between frames: take in what the matcher, the loaders and the
+    /// dictionary lookup have produced, and let old status messages go.
+    pub fn tick(&mut self) {
+        let st = self.searcher.tick(10);
+        if st.changed || self.dirty || (self.was_running && !st.running) {
+            self.refresh_results();
+        }
+        self.was_running = st.running;
+        self.announce_refreshes();
+        self.dict.poll();
+        if self.status.as_ref().is_some_and(|(_, t)| t.elapsed() > STATUS_TTL) {
+            self.status = None;
+        }
+    }
+
+    /// Tick until the loaders are done and the matcher is idle (or `within`
+    /// has passed), then a little longer for the dictionary lookup: a finished
+    /// frame without anyone typing, for seekr.app's snapshots.
+    pub fn settle(&mut self, within: Duration) {
+        let start = Instant::now();
+        while (self.loading() || self.was_running || self.dirty) && start.elapsed() < within {
+            self.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let linger = Instant::now();
+        while linger.elapsed() < Duration::from_millis(600) {
+            self.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the window should be away: dismissed with ⏎ or esc, or parked.
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// In seekr.app's window rather than a terminal: ⏎ and esc hide instead of quitting.
+    fn in_window(&self) -> bool {
+        self.host == Host::Window
     }
 
     /// Load `kinds` into the matcher in the background; with `refresh`, then
@@ -298,6 +284,19 @@ impl App {
         self.searcher.set_query(q);
     }
 
+    /// Clipboard text typed into the query. Line breaks and other control
+    /// characters are dropped: a newline would otherwise act as ⏎.
+    pub fn paste(&mut self, text: &str) {
+        for ch in text.chars().filter(|c| !c.is_control()) {
+            self.handle_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+    }
+
+    /// Select the whole query, as after a hotkey hide: typing replaces it.
+    pub fn select_query(&mut self) {
+        self.line.select_all();
+    }
+
     /// After a key: search again if it changed the query's text.
     fn edited(&mut self, edit: Edit) {
         if edit == Edit::Changed {
@@ -323,39 +322,33 @@ impl App {
         self.status = Some((msg.into(), Instant::now()));
     }
 
-    /// Done with this interaction: quit, or in resident mode reset and hide.
-    /// `restore_focus` sends focus back to the app that was in front before
-    /// seekr (Esc); after opening something, the opened app keeps it instead.
-    fn dismiss(&mut self, restore_focus: bool) {
-        if !self.resident {
+    /// Done with this interaction: quit, or in the window reset and hide. The
+    /// window never takes the focus from the app in front, so there is none
+    /// to hand back; after ⏎ the app that was opened has it.
+    fn dismiss(&mut self) {
+        if !self.in_window() {
             self.quit = true;
             return;
         }
         self.set_input(String::new());
         self.status = None;
         self.hidden = true;
-        self.final_draw = true;
-        if !launcher::hide_window(restore_focus) {
-            // No Hammerspoon to park us: behave like a normal one-shot run.
-            self.quit = true;
-        }
     }
 
-    /// The launcher hid the window without asking (the hotkey while we had focus):
-    /// stop drawing, keep the query, and select it so the next reveal can either
+    /// The window went away without a dismissal (the hotkey again, or a click
+    /// elsewhere): keep the query, and select it so the next press can either
     /// type over it or carry on with it.
-    fn parked(&mut self) {
-        if !self.resident {
+    pub fn parked(&mut self) {
+        if !self.in_window() {
             return;
         }
         self.hidden = true;
-        self.final_draw = true;
         self.status = None;
         self.line.select_all();
     }
 
-    /// The launcher revealed the window: draw again and pick up new files in the background.
-    fn wake_up(&mut self) {
+    /// The window is up again: draw, and pick up new files in the background.
+    pub fn wake_up(&mut self) {
         self.hidden = false;
         self.dirty = true;
         if self.cfg.refresh_on_launch
@@ -388,7 +381,7 @@ impl App {
     }
 
     /// Move the selection one row, wrapping around at either end.
-    fn step(&mut self, delta: isize) {
+    pub fn step(&mut self, delta: isize) {
         let n = self.row_count() as isize;
         if n > 0 {
             self.selected = (self.selected as isize + delta).rem_euclid(n) as usize;
@@ -421,16 +414,15 @@ impl App {
             }
         }
         if dismiss_after {
-            // The opened app has the focus now; the launcher must not hand it back.
-            self.dismiss(false);
+            self.dismiss();
         } else {
             self.flash(format!("{} ✓", action.label()));
         }
     }
 
     /// ⏎ or ^y on the answer row: copy the answer as a plain number. ⏎ in the
-    /// launcher also hides it and hands focus back (nothing was opened); a
-    /// finder in a terminal stays, with the answer still on screen.
+    /// window also hides it; a finder in a terminal stays, with the answer
+    /// still on screen.
     fn copy_calc(&mut self, dismiss: bool) {
         let Some(raw) = self.selected_calc().map(|c| c.raw.clone()) else {
             return;
@@ -439,8 +431,8 @@ impl App {
             self.flash(format!("Copy: {e}"));
             return;
         }
-        if dismiss && self.resident {
-            self.dismiss(true);
+        if dismiss && self.in_window() {
+            self.dismiss();
         } else {
             self.flash(format!("copied {raw} ✓"));
         }
@@ -528,8 +520,7 @@ impl App {
                 self.searcher.record_use(&app, usage);
             }
         }
-        // The app now shows the search and has the focus; the launcher must not hand it back.
-        self.dismiss(false);
+        self.dismiss();
     }
 
     /// Re-walk everything currently loaded (^x, or silently on wake-up).
@@ -567,20 +558,14 @@ impl App {
         };
         match define::open_in_dictionary(&word) {
             // Dictionary has the focus now, like after ⏎.
-            Ok(()) => self.dismiss(false),
+            Ok(()) => self.dismiss(),
             Err(e) => self.flash(format!("Dictionary: {e}")),
         }
     }
 
     fn handle_event(&mut self, ev: Event) {
         match ev {
-            Event::Key(k) if k.kind == KeyEventKind::Press => {
-                // A key while "hidden" means the window is in fact visible.
-                if self.hidden {
-                    self.wake_up();
-                }
-                self.handle_key(k.code, k.modifiers);
-            }
+            Event::Key(k) if k.kind == KeyEventKind::Press => self.handle_key(k.code, k.modifiers),
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::ScrollDown => self.step(1),
                 MouseEventKind::ScrollUp => self.step(-1),
@@ -590,7 +575,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+    pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         // The query selected after a hotkey hide: typing replaces it, any
         // other key keeps it and acts as usual.
         if let Some(edit) = self.line.key_on_selection(code, mods) {
@@ -602,14 +587,16 @@ impl App {
         }
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         match (code, ctrl) {
+            // The window hides: quitting would leave the hotkey with nothing to show.
+            (KeyCode::Char('c' | 'g'), true) if self.in_window() => self.dismiss(),
             (KeyCode::Char('c' | 'g'), true) => self.quit = true,
             // Spotlight convention: esc clears the query first, a second esc dismisses.
             (KeyCode::Esc, _) => {
                 if self.line.is_empty() {
-                    self.dismiss(true);
+                    self.dismiss();
                 } else {
                     self.set_input(String::new());
-                    let then = if self.resident { "hide" } else { "quit" };
+                    let then = if self.in_window() { "hide" } else { "quit" };
                     self.flash(format!("cleared · esc again to {then}"));
                 }
             }
