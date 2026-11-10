@@ -4,15 +4,17 @@
 # shell, so no ~/.zshrc delay); seekr then stays alive between uses and the
 # hotkey only reveals its window.
 #
-#   contrib/install-launcher.sh [--hotkey cmd+space] [--uninstall]
+#   contrib/install-launcher.sh [--hotkey cmd+space] [--opacity 0.85] [--uninstall]
 #
 # --hotkey takes modifiers and key joined with "+" (hs.hotkey names: cmd, ctrl,
 # alt, shift; keys as in hs.keycodes.map). Cmd+Space is Spotlight's shortcut
 # and, on macOS 15, Siri's (hold), so with that hotkey the script turns both
 # shortcuts off (nothing else about Spotlight or Siri changes) and gives them
-# back when a later run picks another key. Re-running keeps the hotkey last
-# installed unless --hotkey says otherwise. --uninstall removes the launcher
-# and gives the shortcuts back; kitty, Hammerspoon and seekr stay installed.
+# back when a later run picks another key. --opacity is the window's, 0 to 1:
+# 0.85 is translucent black with the desktop blurred behind it, 1 is solid
+# black. Re-running keeps the hotkey and opacity last installed unless the
+# options say otherwise. --uninstall removes the launcher and gives the
+# shortcuts back; kitty, Hammerspoon and seekr stay installed.
 # Safe to re-run. Requires Homebrew for the kitty/Hammerspoon install steps.
 # The seekr binary is $SEEKR_BIN, else the one on PATH, else ~/.cargo/bin's or
 # ~/.local/bin's (install.sh's). $SEEKR_LAUNCHER_CMD is how the closing message
@@ -23,8 +25,10 @@ LUA="$HOME/.hammerspoon/seekr.lua"
 INIT="$HOME/.hammerspoon/init.lua"
 DATA="$HOME/Library/Application Support/seekr"
 DEFAULT_HOTKEY=cmd+space
+KITTY_CONF="$HOME/.config/seekr/kitty.conf"
 
 HOTKEY=""
+OPACITY=""
 UNINSTALL=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,8 +36,12 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "--hotkey needs a value, e.g. --hotkey ctrl+space" >&2; exit 2; }
       HOTKEY=$2; shift 2 ;;
     --hotkey=*) HOTKEY=${1#--hotkey=}; shift ;;
+    --opacity)
+      [ $# -ge 2 ] || { echo "--opacity needs a value between 0 and 1, e.g. --opacity 0.85" >&2; exit 2; }
+      OPACITY=$2; shift 2 ;;
+    --opacity=*) OPACITY=${1#--opacity=}; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -126,7 +134,7 @@ if [ -n "$UNINSTALL" ]; then
   end_resident
   FOUND=""
   if [ -f "$LUA" ]; then FOUND=1; fi
-  rm -f "$LUA" "$HOME/.config/seekr/kitty.conf"
+  rm -f "$LUA" "$KITTY_CONF"
   if [ -f "$INIT" ] && grep -qxF 'require("seekr")' "$INIT"; then
     # Written back in place, so a symlinked init.lua stays a symlink.
     KEPT=$(grep -vxF 'require("seekr")' "$INIT" || true)
@@ -156,6 +164,16 @@ HOTKEY=${HOTKEY:-$DEFAULT_HOTKEY}
 HOTKEY=$(printf '%s' "$HOTKEY" | tr 'A-Z' 'a-z')
 case "$HOTKEY" in
   ''|*[!a-z0-9+]*) echo "hotkey: letters, digits and '+' only, e.g. cmd+space (got '$HOTKEY')" >&2; exit 2 ;;
+esac
+
+# Likewise the opacity: without --opacity, keep the installed one, else the
+# kitty config's (translucent).
+if [ -z "$OPACITY" ] && [ -f "$KITTY_CONF" ]; then
+  OPACITY=$(sed -n 's/^background_opacity \([0-9.]*\)$/\1/p' "$KITTY_CONF")
+fi
+case "$OPACITY" in
+  ''|0|1|0.[0-9]*|1.0|1.00|.[0-9]*) ;;
+  *) echo "opacity: a number between 0 and 1, e.g. --opacity 0.85 (got '$OPACITY')" >&2; exit 2 ;;
 esac
 
 SEEKR_BIN=${SEEKR_BIN:-$(command -v seekr 2>/dev/null || true)}
@@ -205,7 +223,10 @@ if [ ! -d /Applications/Hammerspoon.app ]; then
 fi
 
 mkdir -p "$HOME/.config/seekr"
-cp "$HERE/kitty/seekr.conf" "$HOME/.config/seekr/kitty.conf"
+cp "$HERE/kitty/seekr.conf" "$KITTY_CONF"
+if [ -n "$OPACITY" ]; then
+  sed -i '' "s/^background_opacity .*/background_opacity $OPACITY/" "$KITTY_CONF"
+fi
 
 mkdir -p "$HOME/.hammerspoon"
 cp "$HERE/hammerspoon/seekr.lua" "$LUA"
