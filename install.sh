@@ -33,7 +33,7 @@ Install or upgrade seekr: $INSTALL_CMD [options]
   --yes           set up the launcher without asking
   --hotkey KEY    the launcher's key instead of Cmd+Space, e.g. ctrl+space
                   (implies --yes; later runs keep it)
-  --version TAG   install the release TAG, e.g. v0.1.1, instead of the latest
+  --version TAG   install the release TAG, e.g. v1.2.1, instead of the latest
   --uninstall     remove seekr, the launcher, the index and the settings, and
                   give Cmd+Space back to Spotlight
 
@@ -131,7 +131,7 @@ main() {
         HOTKEY=$2; LAUNCHER=yes; shift 2 ;;
       --hotkey=*) HOTKEY=${1#--hotkey=}; LAUNCHER=yes; shift ;;
       --version)
-        [ $# -ge 2 ] || die "--version needs a release tag, e.g. --version v0.1.1"
+        [ $# -ge 2 ] || die "--version needs a release tag, e.g. --version v1.2.1"
         VERSION=$2; shift 2 ;;
       --version=*) VERSION=${1#--version=}; shift ;;
       --uninstall) UNINSTALL=1; shift ;;

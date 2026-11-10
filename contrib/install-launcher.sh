@@ -90,16 +90,18 @@ give_back_shortcuts() {
 
 # End a resident seekr from a previous install, so the next hotkey press starts
 # the freshly installed binary (its kitty window closes with it). seekr itself
-# first, by the pid it advertises: ending kitty before seekr leaves seekr
-# spinning on a dead pty. The pkill catches one without a state file; it must
-# match seekr's whole command line only, since kitty's ends the same way.
+# first, by the pid it advertises. The pkill catches one without a state file;
+# it must match seekr's whole command line only, since kitty's ends the same
+# way. An older binary whose kitty went away spins on the dead pty and is deaf
+# to SIGTERM, so whatever is still there gets SIGKILL.
 end_resident() {
   STATE="$DATA/resident.json"
   if [ -f "$STATE" ]; then
     RESIDENT=$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$STATE")
     [ -n "$RESIDENT" ] && kill -TERM "$RESIDENT" 2>/dev/null && sleep 1 || true
   fi
-  pkill -TERM -x -f -- '[^ ]*/seekr --resident' 2>/dev/null || true
+  pkill -TERM -x -f -- '[^ ]*/seekr --resident' 2>/dev/null && sleep 1 || true
+  pkill -KILL -x -f -- '[^ ]*/seekr --resident' 2>/dev/null || true
   rm -f "$STATE" "$DATA/launcher.json"
 }
 

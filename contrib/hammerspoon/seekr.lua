@@ -155,6 +155,13 @@ local function app()
   return nil
 end
 
+-- Is the panel process we started still up? Not the same as app() ~= nil: for
+-- minutes after a wake from hibernation LaunchServices can lose track of
+-- running processes, and the lookup fails for a panel that is alive.
+local function panelRunning()
+  return M._task ~= nil and M._task:isRunning()
+end
+
 -- Is `w` the launcher's window? Decided by process, not title: a Finder or
 -- VS Code window showing the seekr repo is titled "seekr" as well, and matching
 -- on the title made the hotkey hide the (already hidden) launcher instead of
@@ -346,8 +353,15 @@ end
 -- Bring the window back. Returns false if there is no panel process.
 local function reveal()
   local a = app()
-  if not a then return false end
+  if not a and not panelRunning() then return false end
   wakeResident()
+  if not a then
+    -- Up, but out of sight of LaunchServices (see panelRunning). launch() would
+    -- hand kitty a second panel and lose track of this one for good, so flip
+    -- it blind: when the hotkey is pressed it is nearly always hidden.
+    toggle()
+    return true
+  end
   local w = windowOf(a)
   if w then
     -- Still on screen (the user clicked elsewhere): only the focus is missing.
@@ -371,7 +385,12 @@ function M.hide(restoreFocus)
   local a = app()
   log("hide: app=%s prev=%s restore=%s", a and a:pid() or "nil",
     M._prevWindow and M._prevWindow:title() or "nil", tostring(restoreFocus))
-  if not a then return end
+  if not a then
+    -- Out of sight of LaunchServices (see panelRunning); seekr only asks from
+    -- a window that is showing, so a blind flip hides it.
+    if panelRunning() then toggle() end
+    return
+  end
   -- Already hidden (a second Esc, say)? A toggle would bring it back.
   if windowOf(a) then toggle() end
   local prev = M._prevWindow

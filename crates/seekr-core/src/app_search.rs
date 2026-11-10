@@ -167,6 +167,18 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
+/// For tests elsewhere in the crate: Arc's search and Spotify's, the same on
+/// every Mac. [`AppSearch::builtin`] depends on which browsers are installed,
+/// and a CI runner has Safari only.
+#[cfg(test)]
+pub(crate) fn fixture() -> Vec<AppSearch> {
+    let arc = Browser {
+        bundle_id: "company.thebrowser.Browser".into(),
+        name: "Arc".into(),
+    };
+    vec![AppSearch::web(&arc), AppSearch::spotify()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

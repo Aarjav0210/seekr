@@ -38,6 +38,9 @@ const PAGE: usize = 10;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 /// Skip the wake-up refresh if one ran this recently.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
+/// How long the event loop gets to act on SIGTERM or SIGHUP before the process
+/// ends without it.
+const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 /// App-search mode (`safari: rust lifetimes`): the rest of the query goes to an
 /// app instead of being matched against the index.
@@ -69,6 +72,20 @@ impl Signals {
         register(SIGUSR2, self.park.clone())?;
         register(SIGTERM, self.terminate.clone())?;
         register(SIGHUP, self.terminate.clone())?;
+        // The event loop may never get to read that flag: when the terminal
+        // goes away (kitty crashed, Hammerspoon reloaded) crossterm's poll
+        // stops returning, looping on a read that yields nothing, and without
+        // this the process burns a core until someone sends SIGKILL.
+        let mut ending = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP])?;
+        std::thread::Builder::new()
+            .name("seekr-terminate".into())
+            .spawn(move || {
+                if ending.forever().next().is_some() {
+                    std::thread::sleep(TERMINATE_GRACE);
+                    launcher::clear_state();
+                    std::process::exit(1);
+                }
+            })?;
         Ok(())
     }
 }
