@@ -28,7 +28,7 @@ The hotkey is set by the installer's `--hotkey <mods+key>`, for example
 | `^e` | Open the folder it is in, then quit / hide. |
 | `^y` | Copy its path. |
 | `^v` | Show it in Quick Look. |
-| `⇥` | On Arc or Spotify, or with `arc` / `spotify` typed: search inside the app (see [Searching inside an app](#searching-inside-an-app)). Otherwise cycle the scope: none → `app:` → `doc:` → `dir:` → none, keeping the terms and filters. |
+| `⇥` | On an installed browser or Spotify, or with its keyword (`safari`, `firefox`, `chrome`, … / `spotify`) typed: search inside the app (see [Searching inside an app](#searching-inside-an-app)). Otherwise cycle the scope: none → `app:` → `doc:` → `dir:` → none, keeping the terms and filters. |
 | `^x` | Refresh the index now. |
 | `^l` | With a definition card showing: open the word in Dictionary.app, then quit / hide. |
 | `esc` | Clear the query. On an empty query: quit / hide (you are back in the app you came from). |
@@ -89,18 +89,18 @@ When the query is arithmetic, its answer is the first row and starts out selecte
 
 ## Searching inside an app
 
-After `⇥` on Arc or Spotify the query shows the app as a chip, `Arc ›`, and
+After `⇥` on a browser or Spotify the query shows the app as a chip, `Firefox ›`, and
 what you type is the search. The editing keys work on the search terms; the
 caret can't enter the chip.
 
 | Key | Action |
 |-----|--------|
-| `⏎` | Search in the app (Arc: a Google search; Spotify: its search), then quit / hide. With nothing typed, just open the app. |
+| `⏎` | Search in the app (browser: a Google search; Spotify: its search), then quit / hide. With nothing typed, just open the app. |
 | `^y` | Copy the search URL. |
 | `⌫` with nothing typed | Leave the app search; the query goes back to the keyword. |
 | `esc` | Clear the query, leaving the app search. |
 | `⇥`, `↑`, `↓`, `PageUp`, `PageDown`, `Home`, `End`, `^r`, `^o`, `^e`, `^v`, `^n`, `^p`, `^j`, `^k`, `^d` | Nothing: there is no list here. |
 
-Typing a keyword with a colon, like `arc: rust lifetimes`, starts an app search
+Typing a keyword with a colon, like `firefox: rust lifetimes`, starts an app search
 too. Other apps can be added in `~/.config/seekr/config.toml` (see the
 [README](README.md#search-inside-apps)).

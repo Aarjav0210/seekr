@@ -11,8 +11,8 @@
 
 Fast local search for macOS, in the terminal or behind ⌘Space. Type a few
 letters to find an app, document, folder or file and open it with one key.
-Type `2+2` for an answer, a word for its definition, or press `⇥` on Arc or
-Spotify to search inside the app.
+Type `2+2` for an answer, a word for its definition, or press `⇥` on a
+browser or Spotify to search inside the app.
 
 seekr keeps its own index and never relies on Spotlight's, which can break
 silently: when `mdutil` reports an unknown indexing state for the home volume,
@@ -111,7 +111,7 @@ ask for them with `code:`, which keeps everyday results to things you open.
 | `is:app`, `kind:doc` | The same scopes, written as a filter. |
 | `in:Downloads` | The path contains `Downloads` (also `path:`; `in:~/Desktop/Dev` works). |
 | `ext:pdf` | The name ends in `.pdf` (also `type:`). |
-| `arc: rust lifetimes` | Everything after the keyword goes to Arc; see [Search inside apps](#search-inside-apps). |
+| `safari: rust lifetimes` | Everything after the keyword goes to your browser; see [Search inside apps](#search-inside-apps). |
 
 Scopes and filters combine in any order: `cv in:Downloads ext:pdf`. Scope
 words also come plural or as synonyms: `apps:`, `folder:`, `images:`,
@@ -119,16 +119,22 @@ words also come plural or as synonyms: `apps:`, `folder:`, `images:`,
 
 ### Search inside apps
 
-Select Arc or Spotify (or type `arc` or `spotify`) and press `⇥`. The name
-turns into a chip, `Arc ›`, and what you type next is the search: `⏎` opens a
-Google search in Arc, or Spotify's search, and seekr gets out of the way.
-`⏎` with nothing typed just opens the app, `⌫` on an empty search goes back,
-and `^y` copies the URL. Typing `arc: rust lifetimes` works too. A search
-counts as a use of the app for ranking.
+Select a browser or Spotify (or type its keyword: `safari`, `firefox`,
+`chrome`, `arc`, …, or `spotify`) and press `⇥`. The name turns into a chip,
+`Firefox ›`, and what you type next is the search: `⏎` opens a Google search
+in that browser, or Spotify's search, and seekr gets out of the way. `⏎` with
+nothing typed just opens the app, `⌫` on an empty search goes back, and `^y`
+copies the URL. Typing `firefox: rust lifetimes` works too. A search counts as
+a use of the app for ranking.
+
+Every browser installed in the application folders is offered, and the one
+macOS opens links with comes first. Only installed apps count: on a Mac
+without Arc, `arc` is an ordinary word and `⇥` cycles the scope to `app: arc`
+as usual. `seekr searches` lists what was found, with the keywords.
 
 Any app with a URL scheme, and any browser, can be added in
 `~/.config/seekr/config.toml`. The list replaces the built-in one, so copy the
-Arc and Spotify entries from the commented template in that file:
+browser and Spotify entries from the commented template in that file:
 
 ```toml
 [[searches]]
@@ -143,9 +149,10 @@ app = "md.obsidian"      # the bundle id that opens it: osascript -e 'id of app 
 ```
 
 A keyword can't be a scope or filter word (`app`, `doc`, `in`, …). Apps
-without a search URL (Slack, Notion, Notes, …) can't be added. `seekr
-searches` lists the searches and whether their apps are installed, and `seekr
-search-in spotify daft punk` runs one from the shell.
+without a search URL (Slack, Notion, Notes, …) can't be added, and an entry
+whose `app` is not installed is left out until it is. `seekr searches` lists
+the searches and whether their apps are installed, and `seekr search-in
+spotify daft punk` runs one from the shell.
 
 ### Calculator
 
@@ -281,7 +288,7 @@ to change it.
 | `respect_gitignore` | `true` | Leave out what `.gitignore` files inside git repositories ignore. |
 | `refresh_on_launch` | `true` | Refresh in the background when the finder starts and when the launcher shows it. |
 | `lazy_kinds` | `["code"]` | Kinds only loaded when a query asks for them. |
-| `searches` | Arc, Spotify | The apps `⇥` searches in; see [Search inside apps](#search-inside-apps). |
+| `searches` | installed browsers, Spotify | The apps `⇥` searches in; see [Search inside apps](#search-inside-apps). |
 
 The index and usage log live in `~/Library/Application Support/seekr/index.db`;
 `SEEKR_DATA_DIR` moves them. `SEEKR_DEBUG=1` shows each result's score in the

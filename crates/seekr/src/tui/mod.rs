@@ -49,7 +49,7 @@ pub enum Host {
     Window,
 }
 
-/// App-search mode (`arc: rust lifetimes`): the rest of the query goes to an
+/// App-search mode (`safari: rust lifetimes`): the rest of the query goes to an
 /// app instead of being matched against the index.
 struct AppSearchMode {
     target: AppSearch,
@@ -83,7 +83,7 @@ pub struct App {
     last_refresh: Instant,
     /// The matcher was still busy at the last tick.
     was_running: bool,
-    /// Set while the query starts with an app-search keyword (`arc: …`).
+    /// Set while the query starts with an app-search keyword (`spotify: …`).
     app_search: Option<AppSearchMode>,
     /// The query is a calculation: its answer is pinned above the hits, as row 0.
     calc: Option<Calculation>,
@@ -477,7 +477,14 @@ impl App {
             .hits
             .iter()
             .map(|h| &h.item)
-            .find(|i| i.kind == Kind::App && i.bundle_id == s.app)
+            // Case-insensitively: LaunchServices lowercases bundle ids.
+            .find(|i| {
+                i.kind == Kind::App
+                    && i.bundle_id
+                        .as_deref()
+                        .zip(s.app.as_deref())
+                        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+            })
             .cloned();
         Some((s.clone(), app))
     }

@@ -17,14 +17,19 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Fram
 
 /// Walk the configured application directories and return every `.app` bundle found.
 pub fn scan_app_dirs(cfg: &Config) -> Vec<Item> {
+    walk_app_dirs(&cfg.app_dir_paths())
+}
+
+/// Every `.app` bundle in `dirs` (folders, or `.app` paths themselves).
+pub fn walk_app_dirs(dirs: &[PathBuf]) -> Vec<Item> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out = Vec::new();
-    for root in cfg.app_dir_paths() {
-        if is_app_bundle(&root) {
-            push_app(&root, &mut seen, &mut out);
+    for root in dirs {
+        if is_app_bundle(root) {
+            push_app(root, &mut seen, &mut out);
             continue;
         }
-        let mut it = walkdir::WalkDir::new(&root)
+        let mut it = walkdir::WalkDir::new(root)
             .min_depth(1)
             .max_depth(4)
             .follow_links(false)

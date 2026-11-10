@@ -2,12 +2,16 @@
 //!
 //! Select an app (or type its keyword), press Tab, type the terms, Enter: seekr
 //! builds a URL the app understands and hands it over with `open(1)`, e.g.
-//! `spotify:search:daft%20punk`, or a Google search opened in Arc. Only apps
-//! that register a URL scheme (or browsers, which take `https`) can be
-//! searched this way. Arc and Spotify are built in; `searches` in
-//! `~/.config/seekr/config.toml` replaces the list.
+//! `spotify:search:daft%20punk`, or a Google search opened in the browser.
+//! Only apps that register a URL scheme (or browsers, which take `https`) can
+//! be searched this way. The default browser (see [`crate::browser`]) and
+//! Spotify are built in; `searches` in `~/.config/seekr/config.toml` replaces
+//! the list.
+use crate::browser::{self, Browser};
+use crate::providers::apps;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// Stands in for the percent-encoded terms in [`AppSearch::url`].
 pub const QUERY_PLACEHOLDER: &str = "{query}";
@@ -32,22 +36,61 @@ pub struct AppSearch {
 }
 
 impl AppSearch {
-    /// The searches seekr ships with.
+    /// The searches seekr ships with: a Google search in every installed
+    /// browser (the default one first) and Spotify. Computed once per process
+    /// from the standard application folders.
     pub fn builtin() -> Vec<AppSearch> {
-        vec![
-            AppSearch {
-                keyword: "arc".into(),
-                name: Some("Arc".into()),
-                url: "https://www.google.com/search?q={query}".into(),
-                app: Some("company.thebrowser.Browser".into()),
-            },
-            AppSearch {
-                keyword: "spotify".into(),
-                name: Some("Spotify".into()),
-                url: "spotify:search:{query}".into(),
-                app: Some("com.spotify.client".into()),
-            },
-        ]
+        static BUILTIN: OnceLock<Vec<AppSearch>> = OnceLock::new();
+        BUILTIN
+            .get_or_init(|| {
+                let apps = apps::walk_app_dirs(&crate::config::default_app_dir_paths());
+                let mut out = AppSearch::web_searches(&browser::installed_browsers(&apps));
+                let spotify = AppSearch::spotify();
+                if !out.iter().any(|s| s.keyword.eq_ignore_ascii_case(&spotify.keyword)) {
+                    out.push(spotify);
+                }
+                out
+            })
+            .clone()
+    }
+
+    /// A Google search opened in `browser`; its keyword is the browser's name
+    /// ("Google Chrome" → `chrome`), so Tab works on its row or on the word.
+    pub fn web(browser: &Browser) -> AppSearch {
+        AppSearch {
+            keyword: browser::keyword_for(&browser.name),
+            name: Some(browser.name.clone()),
+            url: "https://www.google.com/search?q={query}".into(),
+            app: Some(browser.bundle_id.clone()),
+        }
+    }
+
+    /// [`AppSearch::web`] for each browser, keywords kept unique: when two
+    /// share one ("Firefox" and "Firefox Developer Edition" are both
+    /// `firefox`) the later takes its whole name, `firefoxdeveloperedition`.
+    pub fn web_searches(browsers: &[Browser]) -> Vec<AppSearch> {
+        let mut out: Vec<AppSearch> = Vec::new();
+        for b in browsers {
+            let mut s = AppSearch::web(b);
+            let taken = |k: &str| out.iter().any(|o| o.keyword.eq_ignore_ascii_case(k));
+            if taken(&s.keyword) {
+                s.keyword = browser::slug(&b.name);
+            }
+            if taken(&s.keyword) || s.validate().is_err() {
+                continue;
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    pub fn spotify() -> AppSearch {
+        AppSearch {
+            keyword: "spotify".into(),
+            name: Some("Spotify".into()),
+            url: "spotify:search:{query}".into(),
+            app: Some("com.spotify.client".into()),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -124,6 +167,18 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
+/// For tests elsewhere in the crate: Arc's search and Spotify's, the same on
+/// every Mac. [`AppSearch::builtin`] depends on which browsers are installed,
+/// and a CI runner has Safari only.
+#[cfg(test)]
+pub(crate) fn fixture() -> Vec<AppSearch> {
+    let arc = Browser {
+        bundle_id: "company.thebrowser.Browser".into(),
+        name: "Arc".into(),
+    };
+    vec![AppSearch::web(&arc), AppSearch::spotify()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,15 +200,62 @@ mod tests {
         assert_eq!(percent_encode("ok-_.~"), "ok-_.~");
     }
 
+    fn arc() -> AppSearch {
+        AppSearch::web(&Browser {
+            bundle_id: "company.thebrowser.Browser".into(),
+            name: "Arc".into(),
+        })
+    }
+
     #[test]
     fn url_for_trims_and_encodes() {
-        let spotify = &AppSearch::builtin()[1];
+        let spotify = AppSearch::spotify();
         assert_eq!(spotify.url_for("  daft punk "), "spotify:search:daft%20punk");
+    }
+
+    fn browser(name: &str, id: &str) -> Browser {
+        Browser {
+            bundle_id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn the_web_search_is_named_after_the_browser() {
+        let arc = arc();
+        assert_eq!(arc.keyword, "arc");
+        assert_eq!(arc.name(), "Arc");
+        let chrome = AppSearch::web(&browser("Google Chrome", "com.google.Chrome"));
+        assert_eq!(chrome.keyword, "chrome");
+        assert_eq!(chrome.app.as_deref(), Some("com.google.Chrome"));
+        chrome.validate().unwrap();
+    }
+
+    #[test]
+    fn web_searches_keep_keywords_unique() {
+        let all = AppSearch::web_searches(&[
+            browser("Firefox", "org.mozilla.firefox"),
+            browser("Firefox Developer Edition", "org.mozilla.firefoxdeveloperedition"),
+            browser("Firefox", "org.example.firefox-clone"),
+            browser("Google Chrome", "com.google.Chrome"),
+        ]);
+        let kws: Vec<&str> = all.iter().map(|s| s.keyword.as_str()).collect();
+        assert_eq!(kws, ["firefox", "firefoxdeveloperedition", "chrome"]);
+    }
+
+    #[test]
+    fn builtins_are_usable_on_this_mac() {
+        let all = AppSearch::builtin();
+        assert!(all.len() >= 2, "{all:?}");
+        assert_eq!(all.last(), Some(&AppSearch::spotify()));
+        let mut cfg = crate::config::Config::default();
+        cfg.searches = all;
+        cfg.validate().unwrap();
     }
 
     #[test]
     fn open_args_name_the_app_and_drop_the_url_without_terms() {
-        let arc = &AppSearch::builtin()[0];
+        let arc = arc();
         assert_eq!(
             arc.open_args("rust lifetimes"),
             vec![
@@ -174,19 +276,21 @@ mod tests {
 
     #[test]
     fn lookups_ignore_case() {
-        let all = AppSearch::builtin();
+        let all = vec![arc(), AppSearch::spotify()];
         assert_eq!(by_keyword(&all, "Spotify").map(|s| s.name()), Some("Spotify"));
         assert!(by_keyword(&all, "spot").is_none());
         assert_eq!(
             for_app(&all, "com.spotify.client").map(|s| s.keyword.as_str()),
             Some("spotify")
         );
+        // LaunchServices and `Info.plist` may disagree on case.
+        assert_eq!(for_app(&all, "company.thebrowser.browser").map(|s| s.name()), Some("Arc"));
         assert!(for_app(&all, "com.apple.Safari").is_none());
     }
 
     #[test]
     fn validation() {
-        for s in AppSearch::builtin() {
+        for s in [arc(), AppSearch::spotify()] {
             s.validate().unwrap();
         }
         assert!(web("doc", "x{query}").validate().is_err(), "scope word");
