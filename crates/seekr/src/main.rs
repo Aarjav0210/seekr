@@ -80,7 +80,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List the apps a query can be handed to (⇥ in the finder): Arc and Spotify by default.
+    /// List the apps a query can be handed to (⇥ in the finder): the installed browsers and Spotify by default.
     Searches {
         #[arg(long)]
         json: bool,
