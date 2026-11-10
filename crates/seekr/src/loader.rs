@@ -1,9 +1,10 @@
 //! Streams items into a live matcher from a background thread:
-//! live app scan → cached index rows → (optionally) an incremental refresh walk
-//! whose newly discovered items are streamed in as they are found.
+//! live app and settings-pane scans → cached index rows → (optionally) an
+//! incremental refresh walk whose newly discovered items are streamed in as
+//! they are found.
 use anyhow::Result;
 use seekr_core::indexer::{self, RefreshReport};
-use seekr_core::providers::apps;
+use seekr_core::providers::{apps, settings};
 use seekr_core::{Config, Index, Injector, Item, Kind, Searcher};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -93,7 +94,7 @@ fn load(
         }
     };
     let apps = apps::scan_app_dirs(cfg);
-    feed(&idx, &apps, &opts.kinds, &push)?;
+    feed(&idx, &apps, &settings::scan(), &opts.kinds, &push)?;
 
     if opts.refresh {
         p.refreshing.store(true, Ordering::Release);
@@ -110,11 +111,21 @@ fn load(
     Ok(())
 }
 
-/// Hand `push` the live app scan (when `kinds` wants apps), then the cached
-/// rows of `kinds`: apps first, so they are searchable while the rest loads.
-fn feed(idx: &Index, apps: &[Item], kinds: &[Kind], mut push: impl FnMut(Item)) -> Result<()> {
+/// Hand `push` the live app and settings-pane scans (those of `kinds`), then
+/// the cached rows of `kinds`: apps first, so they are searchable while the
+/// rest loads.
+fn feed(
+    idx: &Index,
+    apps: &[Item],
+    panes: &[Item],
+    kinds: &[Kind],
+    mut push: impl FnMut(Item),
+) -> Result<()> {
     if kinds.contains(&Kind::App) {
         apps.iter().cloned().for_each(&mut push);
+    }
+    if kinds.contains(&Kind::Setting) {
+        panes.iter().cloned().for_each(&mut push);
     }
     idx.load_items(Some(kinds))?.into_iter().for_each(push);
     Ok(())
@@ -145,7 +156,7 @@ pub fn load_blocking(
         report = Some(indexer::refresh(cfg, &mut idx, &apps, |_| {})?);
     }
     let mut seen = HashSet::new();
-    feed(&idx, &apps, kinds, |it| {
+    feed(&idx, &apps, &settings::scan(), kinds, |it| {
         if seen.insert(it.path.clone()) {
             searcher.push(it);
         }

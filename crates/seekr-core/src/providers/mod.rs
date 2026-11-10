@@ -2,3 +2,4 @@
 pub mod apps;
 pub mod files;
 pub mod places;
+pub mod settings;

@@ -4,7 +4,7 @@ use crate::util::{ellipsize, human_size, relative_time};
 use anyhow::{bail, Result};
 use seekr_core::actions::{self, Action};
 use seekr_core::define::{self, Sense};
-use seekr_core::providers::apps;
+use seekr_core::providers::{apps, settings};
 use seekr_core::search::kinds_for_query;
 use seekr_core::{calc, doctor, indexer, Config, Index, Item, Kind, Query, Searcher};
 use std::io::IsTerminal;
@@ -69,6 +69,13 @@ pub fn search(raw: &str, limit: usize, json: bool, all: bool, fresh: bool) -> Re
 
 pub fn open(path: &Path, reveal: bool) -> Result<()> {
     let idx = Index::open_default()?;
+    // A settings pane's URL, as `seekr search` prints it.
+    if let Some(id) = path.to_string_lossy().strip_prefix(settings::URL_PREFIX) {
+        let item = settings::item(id).unwrap_or_else(|| Item::new(Kind::Setting, id, path));
+        let action = if reveal { Action::Reveal } else { Action::Open };
+        actions::perform(action, &item, Some(&idx))?;
+        return Ok(());
+    }
     // Spelled like the index spells it (absolute, no `./` or trailing `/`),
     // so the use counts for that item's ranking.
     let path: PathBuf = std::path::absolute(path)?.components().collect();
@@ -119,9 +126,10 @@ pub fn index(full: bool, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "apps: {}  (+{} from LaunchServices)\nplaces: {}\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
+            "apps: {}  (+{} from LaunchServices)\nsettings panes: {}\nplaces: {}\nfiles: {}\nfolders: {}\nwalk errors: {}\ntook: {:.2}s\ndb: {}",
             report.apps,
             report.lsregister_apps,
+            report.settings,
             report.places,
             report.files,
             report.folders,
@@ -242,6 +250,43 @@ pub fn searches(json: bool) -> Result<()> {
     }
     println!("\nfinder: select the app (or type its keyword) and press ⇥; shell: seekr search-in <keyword> <terms>");
     println!("config: {} ([[searches]])", Config::config_path().display());
+    Ok(())
+}
+
+/// The System Settings panes installed on this Mac, as the finder lists them.
+pub fn settings(json: bool) -> Result<()> {
+    let panes = settings::scan();
+    if json {
+        let v: Vec<_> = panes
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name,
+                    "words": p.alt,
+                    "id": p.bundle_id,
+                    "url": p.path,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if panes.is_empty() {
+        eprintln!("no System Settings panes found (seekr knows the layout of macOS 13 and later)");
+        return Ok(());
+    }
+    let mut sorted: Vec<&Item> = panes.iter().collect();
+    sorted.sort_by_key(|p| p.name.to_lowercase());
+    println!("{:<26} {:<44} {}", "pane", "also found by", "opens");
+    for p in sorted {
+        println!(
+            "{:<26} {:<44} {}",
+            ellipsize(&p.name, 26),
+            ellipsize(p.alt.as_deref().unwrap_or(""), 44),
+            p.path_display()
+        );
+    }
+    println!("\nfinder: type the pane's name and press ⏎; shell: seekr open <url>, or `open <url>`");
     Ok(())
 }
 

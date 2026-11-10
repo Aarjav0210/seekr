@@ -10,9 +10,9 @@
 ```
 
 Fast local search for macOS, in the terminal or behind ⌘Space. Type a few
-letters to find an app, document, folder or file and open it with one key.
-Type `2+2` for an answer, a word for its definition, or press `⇥` on a
-browser or Spotify to search inside the app.
+letters to find an app, System Settings pane, document, folder or file and
+open it with one key. Type `2+2` for an answer, a word for its definition, or
+press `⇥` on a browser or Spotify to search inside the app.
 
 seekr keeps its own index and never relies on Spotlight's, which can break
 silently: when `mdutil` reports an unknown indexing state for the home volume,
@@ -80,6 +80,11 @@ What is searched:
   /System/Applications, their Utilities folders, CoreServices and Finder,
   wrapper folders such as `WhatsApp.localized` included (Spotlight misses
   those).
+- **System Settings panes**, like Spotlight: `mouse` opens System Settings ›
+  Mouse, `dark mode` finds Appearance, `dock` finds Desktop & Dock. The panes
+  installed on the Mac are scanned live at every start (macOS 13 or later),
+  named as the sidebar names them, with a few extra words each; `seekr
+  settings` lists them. See [Settings panes](#settings-panes).
 - **Places**: your home folder (also found as `home`), Desktop, Documents,
   Downloads, Pictures, Movies, Music, Public, Library, iCloud Drive, Trash,
   /Applications, /Applications/Utilities, ~/Applications and every root.
@@ -91,9 +96,10 @@ What is searched:
   such as `.app`, `.pages`, `.key`, `.photoslibrary` and `.xcodeproj` are
   one item each.
 
-Everything is an app, document, folder, image, video, audio file, archive,
-source file or other file. Source files are indexed but only loaded when you
-ask for them with `code:`, which keeps everyday results to things you open.
+Everything is an app, settings pane, document, folder, image, video, audio
+file, archive, source file or other file. Source files are indexed but only
+loaded when you ask for them with `code:`, which keeps everyday results to
+things you open.
 
 ### Query language
 
@@ -101,6 +107,7 @@ ask for them with `code:`, which keeps everyday results to things you open.
 |-------|-------|
 | `whatsapp` | Everything, fuzzy; apps rank first. |
 | `app: whatsapp` | Apps only. |
+| `settings: mouse` | System Settings panes only (also `prefs:`). |
 | `doc: offer letter` | Documents: pdf, doc(x), ppt(x), xls(x), pages, numbers, key, md, txt, rtf, csv, epub, … |
 | `dir: aeo` | Folders. |
 | `img:` `vid:` `audio:` `zip:` `code:` `file:` | Images, video, audio, archives, source files, other files. |
@@ -149,6 +156,30 @@ without a search URL (Slack, Notion, Notes, …) can't be added, and an entry
 whose `app` is not installed is left out until it is. `seekr searches` lists
 the searches and whether their apps are installed, and `seekr search-in
 spotify daft punk` runs one from the shell.
+
+### Settings panes
+
+Type the name of a System Settings pane, `mouse`, `displays`, `wallpaper`, and
+`⏎` opens System Settings on it, the way Spotlight does; the launcher hides
+and System Settings keeps the focus. The row says `System Settings` where a
+file's row shows its folder, and the details pane shows the pane's extra
+words and the URL that opens it: `^y` copies the URL, `^r` reveals System
+Settings in Finder. A pane has no Quick Look.
+
+Every pane in the sidebar is there, General's sub-panes included (Software
+Update, Storage, Sharing, Time Machine, Date & Time, …), and each knows a few
+other words it is usually looked for by: `dark mode` finds Appearance, `dock`
+and `hot corners` Desktop & Dock, `wifi` Wi-Fi, `backup` Time Machine, `energy`
+Battery. The list comes from the pane extensions installed on the Mac
+(`/System/Library/ExtensionKit/Extensions` and System Settings' own
+plug-ins), so a Mac without Touch ID or a pane a macOS update retired never
+offers it; a pane seekr doesn't know by name is still listed, named after its
+identifier. macOS also hides a few panes while their hardware is away (Mouse
+without a mouse connected, Headphones without AirPods): those stay listed,
+and opening one shows System Settings where it was. `seekr settings` prints
+them all, and `seekr open
+x-apple.systempreferences:com.apple.Mouse-Settings.extension` opens one from
+the shell.
 
 ### Calculator
 
@@ -232,6 +263,8 @@ seekr search --fresh invoice       # refresh the index first
 seekr open ~/Downloads/x.pdf       # open, counting the use for ranking; --reveal shows it in Finder
 seekr search-in spotify daft punk  # search inside an app; --print shows the URL instead
 seekr searches                     # the apps ⇥ can search in, and whether they are installed
+seekr settings                     # the System Settings panes the finder opens
+seekr open x-apple.systempreferences:com.apple.Mouse-Settings.extension   # open a pane
 seekr calc '(1+2)^10/7'            # 8435.5714285714; exits 1 when it isn't a calculation
 seekr define serendipity           # the dictionary entry; exits 1 when there is none
 seekr kinds                        # the query language's scopes and filters
@@ -242,8 +275,8 @@ seekr doctor                       # Spotlight's health and the index's
 
 ## Freshness
 
-Apps are scanned live every time seekr starts. Everything else comes from the
-index, which is refreshed in the background whenever the finder starts or the
+Apps and settings panes are scanned live every time seekr starts. Everything
+else comes from the index, which is refreshed in the background whenever the finder starts or the
 launcher shows it (at most every 5 seconds), and on demand with `^x`, `seekr
 refresh` or `seekr search --fresh`. A refresh re-walks the roots (about 1.5 s
 for 150k items), writes only what changed and reports it: `refreshed in 1.6s ·
@@ -256,8 +289,13 @@ listing them until seekr restarts.
 Each result scores fuzzy match × kind × place or exact-app boost × depth
 penalty × repository penalty, plus frecency:
 
-- Apps outrank documents, which outrank folders, media, archives, other files
-  and source files, unless the query has a scope.
+- Apps outrank settings panes, which outrank documents, which outrank
+  folders, media, archives, other files and source files, unless the query
+  has a scope.
+- A settings pane named exactly what you typed (`mouse`, `sound`, or one of
+  its extra words: `dark mode`) comes before apps that merely start with it;
+  an app of that exact name still wins, and so does an app that starts with
+  the letters typed so far (`key`: Keynote, then Keyboard; `keyb`: Keyboard).
 - Typing the start of a place's name (`downl`, `desk`, `icloud`, `home`)
   makes it the top hit, above apps that merely contain the word; an app named
   exactly what you typed still comes first (`music`: Music, then ~/Music).
@@ -290,8 +328,8 @@ details pane and in `seekr search`.
 ## Layout
 
 ```text
-crates/seekr-core   library, no UI: items, query parser, providers (apps, places,
-                    files), SQLite index and usage log, nucleo matcher and ranking,
+crates/seekr-core   library, no UI: items, query parser, providers (apps, settings
+                    panes, places, files), SQLite index and usage log, nucleo matcher and ranking,
                     actions (open, reveal, copy, Quick Look), app searches,
                     calculator, definitions (macOS dictionary), doctor
 crates/seekr        the binary: CLI (main.rs, cli.rs), finder (tui/: state and
@@ -316,6 +354,6 @@ picks up as the latest.
 
 - FSEvents watcher for live index updates.
 - Document content search (text and PDF extraction into FTS5).
-- More providers: browser bookmarks and history, contacts, settings panes,
-  clipboard, actions such as `> sleep`.
+- More providers: browser bookmarks and history, contacts, clipboard, actions
+  such as `> sleep`.
 - MCP server exposing search, open, reveal and refresh as agent tools.
