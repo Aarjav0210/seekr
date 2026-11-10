@@ -33,8 +33,8 @@ Install or upgrade seekr: $INSTALL_CMD [options]
   --yes           set up the launcher without asking
   --hotkey KEY    the launcher's key instead of Cmd+Space, e.g. ctrl+space
                   (implies --yes; later runs keep it)
-  --opacity N     the launcher window's opacity, 0 to 1: 0.85 is translucent
-                  black, 1 is solid (implies --yes; later runs keep it)
+  --opacity N     the launcher window's opacity, 0 to 1: 0.8 is translucent
+                  grey, 1 is solid (implies --yes; later runs keep it)
   --version TAG   install the release TAG, e.g. v1.2.1, instead of the latest
   --uninstall     remove seekr, the launcher, the index and the settings, and
                   give Cmd+Space back to Spotlight
@@ -134,7 +134,7 @@ main() {
         HOTKEY=$2; LAUNCHER=yes; shift 2 ;;
       --hotkey=*) HOTKEY=${1#--hotkey=}; LAUNCHER=yes; shift ;;
       --opacity)
-        [ $# -ge 2 ] || die "--opacity needs a value between 0 and 1, e.g. --opacity 0.85"
+        [ $# -ge 2 ] || die "--opacity needs a value between 0 and 1, e.g. --opacity 0.8"
         OPACITY=$2; LAUNCHER=yes; shift 2 ;;
       --opacity=*) OPACITY=${1#--opacity=}; LAUNCHER=yes; shift ;;
       --version)

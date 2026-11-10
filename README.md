@@ -47,8 +47,8 @@ curl -fsSL https://raw.githubusercontent.com/Aarjav0210/seekr/main/install.sh | 
   launcher without asking.
 - `--hotkey ctrl+space` uses another key and gives ⌘Space back to Spotlight;
   later runs keep it.
-- `--opacity 1` makes the window solid black instead of translucent (any
-  number from 0 to 1; later runs keep it).
+- `--opacity 1` makes the window solid instead of translucent (any number
+  from 0 to 1; later runs keep it).
 - `--version v1.2.1` installs that release instead of the latest.
 - `--uninstall` removes seekr, the launcher, the index and the settings, takes
   `~/.local/bin` back off your PATH and gives ⌘Space back. kitty and
@@ -243,9 +243,9 @@ instead; the installer prints which of the two it uses.
 
 The window is a kitty panel (it can appear on any desktop), started by
 Hammerspoon with `seekr --resident` and no shell in between, so `~/.zshrc`
-never slows it down. It is translucent black with the desktop blurred behind
-it, like Spotlight; `--opacity 1` (installer or `contrib/install-launcher.sh`)
-makes it solid. Hammerspoon shows and hides it with kitty's
+never slows it down. It is translucent dark grey with the desktop blurred
+behind it, like Spotlight; `--opacity 1` (installer or
+`contrib/install-launcher.sh`) makes it solid. Hammerspoon shows and hides it with kitty's
 `--toggle-visibility` and tells seekr through signals: SIGUSR1 when it shows
 the window (seekr refreshes), SIGUSR2 when the hotkey hid it (seekr keeps the
 query). seekr asks Hammerspoon to hide the window after `⏎` or `esc`. The
