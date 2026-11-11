@@ -11,8 +11,9 @@
 
 Fast local search for macOS, in the terminal or behind ⌘Space. Type a few
 letters to find an app, System Settings pane, document, folder or file and
-open it with one key. Type `2+2` for an answer, a word for its definition, or
-press `⇥` on a browser or Spotify to search inside the app.
+open it with one key. Type `2+2` for an answer, a word for its definition,
+`⇧⏎` to search the web for whatever you typed, or press `⇥` on a browser or
+Spotify to search inside the app.
 
 seekr keeps its own index and never relies on Spotlight's, which can break
 silently: when `mdutil` reports an unknown indexing state for the home volume,
@@ -72,7 +73,8 @@ and bundle id. With an empty query, recently opened items come first.
 
 `⏎` opens the selection, `^r` reveals it in Finder, `^e` opens its folder,
 `^y` copies its path, `^v` shows it in Quick Look and `^x` refreshes the
-index. `esc` clears the query; a second `esc` quits.
+index. `⇧⏎` searches the web for the query instead (see [Search the
+web](#search-the-web)). `esc` clears the query; a second `esc` quits.
 
 What is searched:
 
@@ -156,6 +158,21 @@ without a search URL (Slack, Notion, Notes, …) can't be added, and an entry
 whose `app` is not installed is left out until it is. `seekr searches` lists
 the searches and whether their apps are installed, and `seekr search-in
 spotify daft punk` runs one from the shell.
+
+### Search the web
+
+Type anything, `what's the weather`, and press `⇧⏎`: a Google search for it
+opens in your default browser and seekr gets out of the way. `^s` does the
+same in terminals that can't tell `⇧⏎` from `⏎` (kitty, which hosts the
+launcher, can). When a query matches nothing at all, plain `⏎` searches the web
+too, once the index has finished loading, so nothing you meant to open is
+pre-empted. In an app search, `⇧⏎` sends the terms to the web instead of the
+app.
+
+The browser is whichever one macOS opens links with; the URL template is the
+one configured for that browser in `searches`, so switching it to DuckDuckGo
+there switches this too. `seekr web what's the weather` does it from the
+shell; `--print` shows the URL.
 
 ### Settings panes
 
@@ -262,6 +279,7 @@ seekr search --all main            # include source files without `code:`
 seekr search --fresh invoice       # refresh the index first
 seekr open ~/Downloads/x.pdf       # open, counting the use for ranking; --reveal shows it in Finder
 seekr search-in spotify daft punk  # search inside an app; --print shows the URL instead
+seekr web what's the weather       # search the web in the default browser; --print shows the URL
 seekr searches                     # the apps ⇥ can search in, and whether they are installed
 seekr settings                     # the System Settings panes the finder opens
 seekr open x-apple.systempreferences:com.apple.Mouse-Settings.extension   # open a pane

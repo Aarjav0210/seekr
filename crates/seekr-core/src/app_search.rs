@@ -40,18 +40,12 @@ impl AppSearch {
     /// browser (the default one first) and Spotify. Computed once per process
     /// from the standard application folders.
     pub fn builtin() -> Vec<AppSearch> {
-        static BUILTIN: OnceLock<Vec<AppSearch>> = OnceLock::new();
-        BUILTIN
-            .get_or_init(|| {
-                let apps = apps::walk_app_dirs(&crate::config::default_app_dir_paths());
-                let mut out = AppSearch::web_searches(&browser::installed_browsers(&apps));
-                let spotify = AppSearch::spotify();
-                if !out.iter().any(|s| s.keyword.eq_ignore_ascii_case(&spotify.keyword)) {
-                    out.push(spotify);
-                }
-                out
-            })
-            .clone()
+        builtins().searches.clone()
+    }
+
+    /// The browser macOS opens links with; see [`crate::browser`].
+    pub fn default_browser() -> Browser {
+        builtins().browser.clone()
     }
 
     /// A Google search opened in `browser`; its keyword is the browser's name
@@ -60,7 +54,7 @@ impl AppSearch {
         AppSearch {
             keyword: browser::keyword_for(&browser.name),
             name: Some(browser.name.clone()),
-            url: "https://www.google.com/search?q={query}".into(),
+            url: GOOGLE.into(),
             app: Some(browser.bundle_id.clone()),
         }
     }
@@ -134,6 +128,32 @@ impl AppSearch {
         Ok(())
     }
 }
+
+/// What one scan of the application folders tells us, kept for the process.
+struct Builtins {
+    browser: Browser,
+    searches: Vec<AppSearch>,
+}
+
+fn builtins() -> &'static Builtins {
+    static BUILTINS: OnceLock<Builtins> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        let apps = apps::walk_app_dirs(&crate::config::default_app_dir_paths());
+        let browsers = browser::installed_browsers(&apps);
+        let mut searches = AppSearch::web_searches(&browsers);
+        let spotify = AppSearch::spotify();
+        if !searches.iter().any(|s| s.keyword.eq_ignore_ascii_case(&spotify.keyword)) {
+            searches.push(spotify);
+        }
+        Builtins {
+            browser: browsers.into_iter().next().unwrap_or_else(|| browser::default_browser(&[])),
+            searches,
+        }
+    })
+}
+
+/// The Google template the built-in browser searches use.
+pub const GOOGLE: &str = "https://www.google.com/search?q={query}";
 
 /// The search whose keyword is `word`, case-insensitively.
 pub fn by_keyword<'a>(searches: &'a [AppSearch], word: &str) -> Option<&'a AppSearch> {

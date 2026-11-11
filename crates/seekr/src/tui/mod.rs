@@ -15,10 +15,11 @@ use definition::DictLookup;
 use query_line::{Edit, QueryLine};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::SetTitle;
+use ratatui::crossterm::terminal::{supports_keyboard_enhancement, SetTitle};
 use ratatui::widgets::ListState;
 use seekr_core::actions::{self, Action};
 use seekr_core::calc::{self, Calculation};
@@ -120,6 +121,8 @@ struct App {
     calc: Option<Calculation>,
     /// Dictionary entry for a one-word query, looked up in the background.
     dict: DictLookup,
+    /// The matcher has not caught up with the query yet: results may still appear.
+    matching: bool,
 }
 
 pub fn run(initial: String, resident: bool) -> Result<()> {
@@ -141,7 +144,18 @@ pub fn run(initial: String, resident: bool) -> Result<()> {
     // Own the mouse: otherwise the wheel scrolls the terminal's own buffer and
     // the UI slides out of view. Wheel events move the selection instead.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // Terminals speaking the kitty keyboard protocol (kitty, the launcher's
+    // host) can then tell ⇧⏎ from ⏎; elsewhere ⇧⏎ is a plain ⏎ and ^s stands in.
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
     let res = event_loop(&mut terminal, &mut app);
+    if enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     if resident {
@@ -169,6 +183,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             app.handle_event(event::read()?);
         }
         let st = app.searcher.tick(10);
+        app.matching = st.running;
         if st.changed || app.dirty || (was_running && !st.running) {
             app.refresh_results();
         }
@@ -213,6 +228,7 @@ impl App {
             app_search: None,
             calc: None,
             dict: DictLookup::spawn(),
+            matching: false,
         };
         app.spawn_loader(app.cfg.eager_kinds(), app.cfg.refresh_on_launch);
         Ok(app)
@@ -539,6 +555,38 @@ impl App {
         self.dismiss(false);
     }
 
+    /// ⇧⏎ / ^s: search the web for the whole query (or, in an app search, for
+    /// its terms) in the default browser, then dismiss.
+    fn web_search(&mut self) {
+        let terms = match &self.app_search {
+            Some(m) => m.terms.clone(),
+            None => self.line.text().to_string(),
+        };
+        if terms.trim().is_empty() {
+            self.flash("type something to search the web for");
+            return;
+        }
+        let search = self.cfg.web_search();
+        if let Err(e) = actions::app_search(&search, &terms) {
+            self.flash(format!("Search the web: {e}"));
+            return;
+        }
+        // The browser has the focus now; the launcher must not hand it back.
+        self.dismiss(false);
+    }
+
+    /// ⏎ falls back to a web search when it has nothing else to do: a query
+    /// with no rows, no definition card, and nothing still on its way (the
+    /// matcher caught up and no loader is running), so a result the user
+    /// expects is never pre-empted by a browser tab.
+    pub fn web_is_the_only_option(&self) -> bool {
+        !self.line.is_empty()
+            && self.row_count() == 0
+            && self.definition().is_none()
+            && !self.matching
+            && !self.loading()
+    }
+
     /// Re-walk everything currently loaded (^x, or silently on wake-up).
     fn refresh_index(&mut self, announce: bool) {
         if self.refreshing() {
@@ -620,7 +668,10 @@ impl App {
                     self.flash(format!("cleared · esc again to {then}"));
                 }
             }
+            (KeyCode::Enter, _) if mods.contains(KeyModifiers::SHIFT) => self.web_search(),
+            (KeyCode::Char('s'), true) => self.web_search(),
             (KeyCode::Enter, _) if self.selected_calc().is_some() => self.copy_calc(true),
+            (KeyCode::Enter, _) if self.web_is_the_only_option() => self.web_search(),
             (KeyCode::Enter, _) => self.act(Action::Open, true),
             (KeyCode::Char('r' | 'o'), true) => self.act(Action::Reveal, true),
             (KeyCode::Char('e'), true) => self.act(Action::OpenParent, true),
@@ -654,6 +705,9 @@ impl App {
         let keyword = mode.target.keyword.clone();
         let url = mode.target.url_for(&mode.terms);
         match (code, ctrl) {
+            // ⇧⏎ / ^s: the terms go to the web instead of the app.
+            (KeyCode::Enter, _) if mods.contains(KeyModifiers::SHIFT) => self.web_search(),
+            (KeyCode::Char('s'), true) => self.web_search(),
             (KeyCode::Enter, _) => self.run_app_search(),
             // Nothing typed yet: ⌫ steps out of the search and leaves the keyword.
             (KeyCode::Backspace, _) if nothing_typed => self.set_input(keyword),

@@ -20,7 +20,8 @@ example `--hotkey ctrl+space`.
 
 | Key | Action |
 |-----|--------|
-| `⏎` | Open the selected item, then quit / hide. The app that opens keeps the focus. |
+| `⏎` | Open the selected item, then quit / hide. The app that opens keeps the focus. With no results at all (and the index loaded), search the web for the query instead. |
+| `⇧⏎`, `^s` | Search the web for the whole query in the default browser, then quit / hide. `⇧⏎` needs a terminal with the kitty keyboard protocol (kitty, the launcher's host); `^s` works everywhere. |
 | `^r`, `^o` | Reveal it in Finder, then quit / hide. |
 | `^e` | Open the folder it is in, then quit / hide. |
 | `^y` | Copy its path. |
@@ -94,6 +95,7 @@ caret can't enter the chip.
 | Key | Action |
 |-----|--------|
 | `⏎` | Search in the app (browser: a Google search; Spotify: its search), then quit / hide. With nothing typed, just open the app. |
+| `⇧⏎`, `^s` | Search the web for the terms in the default browser instead. |
 | `^y` | Copy the search URL. |
 | `⌫` with nothing typed | Leave the app search; the query goes back to the keyword. |
 | `esc` | Clear the query, leaving the app search. |

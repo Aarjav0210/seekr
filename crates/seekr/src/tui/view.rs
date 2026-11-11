@@ -174,7 +174,7 @@ fn draw_input(f: &mut Frame, outer: Rect, app: &App) {
         Some("type to replace · → keeps · esc clear ".into())
     } else if let Some(m) = &app.app_search {
         Some(if !m.terms.is_empty() {
-            "⏎ search · ^y copy url · esc clear ".into()
+            "⏎ search · ⇧⏎ web · ^y copy url · esc clear ".into()
         } else if m.target.app.is_some() {
             format!("⏎ opens {} · ⌫ back · esc clear ", m.target.name())
         } else {
@@ -183,9 +183,11 @@ fn draw_input(f: &mut Frame, outer: Rect, app: &App) {
     } else if app.selected_calc().is_some() {
         Some("⏎ copy answer · esc clear ".into())
     } else if let Some((s, _)) = app.search_for_selection() {
-        Some(format!("⇥ search in {} · esc clear ", s.name()))
+        Some(format!("⇥ search in {} · ⇧⏎ web · esc clear ", s.name()))
+    } else if app.web_is_the_only_option() {
+        Some(format!("⏎ search the web in {} · esc clear ", app.cfg.web_search().name()))
     } else {
-        Some("esc clear · ^w delete word ".into())
+        Some("⇧⏎ search the web · esc clear ".into())
     };
     if let Some(tip) = tip {
         let tip_w = Span::raw(tip.as_str()).width() as u16;
@@ -362,6 +364,11 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(app.line.text().to_string(), Style::new().add_modifier(Modifier::BOLD)),
         ]),
         Line::from(""),
+        Line::from(vec![
+            Span::raw("  press "),
+            Span::styled(if app.web_is_the_only_option() { "⏎" } else { "⇧⏎" }, KEY),
+            Span::raw(format!(" to search the web for it in {}", app.cfg.web_search().name())),
+        ]),
         Line::from(vec![
             Span::raw("  just added or downloaded it?  press "),
             Span::styled("^x", KEY),

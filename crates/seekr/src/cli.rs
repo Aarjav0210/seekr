@@ -330,6 +330,34 @@ pub fn search_in(keyword: &str, terms: &str, print: bool, json: bool) -> Result<
     Ok(())
 }
 
+/// `seekr web what's the weather`: search the web for the terms in the
+/// default browser, or with `--print` just show the URL.
+pub fn web(terms: &str, print: bool, json: bool) -> Result<()> {
+    let cfg = Config::load()?;
+    let s = cfg.web_search();
+    let terms = terms.trim();
+    if terms.is_empty() {
+        bail!("nothing to search for");
+    }
+    if !print {
+        actions::app_search(&s, terms)?;
+    }
+    let url = s.url_for(terms);
+    if json {
+        let v = serde_json::json!({
+            "browser": s.name(),
+            "terms": terms,
+            "url": url,
+            "command": ["open", &url],
+            "opened": !print,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if print {
+        println!("{url}");
+    }
+    Ok(())
+}
+
 /// `seekr calc 2+2*3`: print the answer (`8`; with thousands separators on a
 /// terminal, plain when piped), or with `--json` the whole [`calc::Calculation`].
 /// Not a calculation, division by zero and undefined results exit non-zero

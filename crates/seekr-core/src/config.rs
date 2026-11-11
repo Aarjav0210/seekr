@@ -326,6 +326,26 @@ impl Config {
     pub fn search_for_app(&self, bundle_id: &str) -> Option<&AppSearch> {
         app_search::for_app(&self.searches, bundle_id)
     }
+
+    /// "Search the web" (⇧⏎ in the finder): the whole query goes to the
+    /// default browser. The URL template is the one configured for that
+    /// browser, so swapping Google out in `searches` applies here too; Google
+    /// otherwise. No `app` is set, so `open` lets macOS pick the browser.
+    pub fn web_search(&self) -> AppSearch {
+        let browser = AppSearch::default_browser();
+        let url = self
+            .searches
+            .iter()
+            .find(|s| s.app.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&browser.bundle_id)))
+            .map(|s| s.url.clone())
+            .unwrap_or_else(|| app_search::GOOGLE.to_string());
+        AppSearch {
+            keyword: "web".into(),
+            name: Some(browser.name),
+            url,
+            app: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +379,29 @@ mod tests {
         assert_eq!(cfg.unavailable[0].keyword, "arc");
         assert!(cfg.search_by_keyword("arc").is_none());
         assert!(cfg.search_for_app("company.thebrowser.Browser").is_none());
+    }
+
+    #[test]
+    fn the_web_search_follows_the_default_browsers_template() {
+        let browser = AppSearch::default_browser();
+        let mut cfg: Config = toml::from_str("max_depth = 3").unwrap();
+        let w = cfg.web_search();
+        assert_eq!(w.name(), browser.name);
+        assert!(w.app.is_none(), "macOS picks the browser");
+        assert_eq!(w.url, app_search::GOOGLE);
+        cfg.searches = vec![AppSearch {
+            keyword: "b".into(),
+            name: None,
+            url: "https://duckduckgo.com/?q={query}".into(),
+            app: Some(browser.bundle_id.to_ascii_uppercase()),
+        }];
+        assert_eq!(cfg.web_search().url, "https://duckduckgo.com/?q={query}");
+        cfg.searches.clear();
+        assert_eq!(cfg.web_search().url, app_search::GOOGLE);
+        assert_eq!(
+            cfg.web_search().open_args("what's the weather"),
+            vec!["https://www.google.com/search?q=what%27s%20the%20weather"]
+        );
     }
 
     #[test]
