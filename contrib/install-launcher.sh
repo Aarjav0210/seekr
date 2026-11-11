@@ -228,6 +228,9 @@ mkdir -p "$HOME/.config/seekr"
 cp "$HERE/kitty/seekr.conf" "$KITTY_CONF"
 if [ -n "$OPACITY" ]; then
   sed -i '' "s/^background_opacity .*/background_opacity $OPACITY/" "$KITTY_CONF"
+  # The backing behind text is never more see-through than the window.
+  BACKING=$(awk -v o="$OPACITY" 'BEGIN { print (o > 0.85) ? o : 0.85 }')
+  sed -i '' "/^transparent_background_colors /s/@[0-9.]*/@$BACKING/g" "$KITTY_CONF"
   mkdir -p "$DATA"
   printf '%s\n' "$OPACITY" > "$OPACITY_FILE"
 fi

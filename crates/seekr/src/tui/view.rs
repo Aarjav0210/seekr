@@ -4,6 +4,7 @@
 use super::definition;
 use super::{App, AppSearchMode};
 use crate::util::{ellipsize, human_size, relative_time};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,15 +18,24 @@ const COMPACT_WIDTH: u16 = 90;
 /// Nerd Font magnifier, for the row that runs an app search.
 const SEARCH_GLYPH: &str = "\u{f002}";
 
-/// Frames, labels, hints.
+/// Labels, hints.
 pub const DIM: Style = Style::new().fg(Color::DarkGray);
+/// Pane frames. The same grey as DIM on screen (palette colour 8 either way),
+/// but written as the indexed colour so `back_text` can tell a frame cell
+/// from dim text; nothing else uses `Indexed(8)`.
+const FRAME: Style = Style::new().fg(Color::Indexed(8));
+/// Behind text, so it stays readable when the launcher window is translucent:
+/// kitty keeps cells of this colour nearly opaque while the default background
+/// (empty cells) shows the desktop through. Listed, with the highlight colour,
+/// in contrib/kitty/seekr.conf (transparent_background_colors); keep the three
+/// the same. Off by one from the window's own grey (#35353a) on purpose: kitty
+/// treats cells in exactly the default colour as default background.
+const BACKING: Color = Color::Rgb(54, 54, 59);
 /// Keys in hints.
 pub const KEY: Style = Style::new().fg(Color::Cyan);
 /// The prompt, the app-search chip, answers.
 const ACCENT: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 /// The selected row.
-// Listed in contrib/kitty/seekr.conf (transparent_background_colors) so the
-// launcher window makes it as see-through as the rest; keep the two the same.
 const HIGHLIGHT: Style = Style::new().bg(Color::Rgb(70, 74, 86)).add_modifier(Modifier::BOLD);
 /// The whole query, selected after a hotkey hide.
 const SELECTED_TEXT: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
@@ -83,6 +93,73 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
     draw_status(f, rows[2], app);
+    back_text(f.buffer_mut(), area);
+}
+
+/// Put BACKING behind every stretch of a row that carries text: between two
+/// frame cells (or the screen edges), if anything in that stretch is not a
+/// blank, every cell still on the default background gets it. Blank rows
+/// between two backed rows get it too when the gap is at most two rows, so a
+/// block of text with a line break in it reads as one card. Frames and blank
+/// stretches stay on the default background, which is the see-through part.
+fn back_text(buf: &mut Buffer, area: Rect) {
+    let is_frame = |c: &ratatui::buffer::Cell| c.fg == Color::Indexed(8) && !c.symbol().trim().is_empty();
+    let w = area.width as usize;
+    let mut backed = vec![false; w * area.height as usize];
+    let mut frame = vec![false; w * area.height as usize];
+    for (row, y) in (area.top()..area.bottom()).enumerate() {
+        let mut x = area.left();
+        while x < area.right() {
+            let start = x;
+            let mut has_text = false;
+            while x < area.right() {
+                let Some(c) = buf.cell((x, y)) else { break };
+                if is_frame(c) {
+                    frame[row * w + (x - area.left()) as usize] = true;
+                    break;
+                }
+                has_text |= !c.symbol().trim().is_empty();
+                x += 1;
+            }
+            if has_text {
+                for xx in start..x {
+                    backed[row * w + (xx - area.left()) as usize] = true;
+                }
+            }
+            x += 1;
+        }
+    }
+    for col in 0..w {
+        let mut last: Option<usize> = None;
+        for row in 0..area.height as usize {
+            if frame[row * w + col] {
+                last = None;
+                continue;
+            }
+            if !backed[row * w + col] {
+                continue;
+            }
+            if let Some(l) = last {
+                if row - l <= 3 {
+                    for r in l + 1..row {
+                        backed[r * w + col] = true;
+                    }
+                }
+            }
+            last = Some(row);
+        }
+    }
+    for (row, y) in (area.top()..area.bottom()).enumerate() {
+        for (col, x) in (area.left()..area.right()).enumerate() {
+            if backed[row * w + col] {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    if c.bg == Color::Reset {
+                        c.bg = BACKING;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A box with a dim frame.
@@ -90,7 +167,7 @@ pub fn pane<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(DIM)
+        .border_style(FRAME)
 }
 
 /// `⏎ open  ^r reveal`: each key in the key colour, then what it does (with
@@ -620,6 +697,54 @@ fn draw_definition(f: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which cells of `buf` carry BACKING, one char per cell: `#` or `.`.
+    fn backing_map(buf: &Buffer) -> Vec<String> {
+        let a = buf.area;
+        (a.top()..a.bottom())
+            .map(|y| {
+                (a.left()..a.right())
+                    .map(|x| if buf[(x, y)].bg == BACKING { '#' } else { '.' })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn backing_follows_text_between_frames() {
+        let area = Rect::new(0, 0, 12, 7);
+        let mut buf = Buffer::empty(area);
+        // Two panes side by side, 6 columns each; the left has text on rows
+        // 1 and 3 (one blank row between: bridged), the right on row 1 only.
+        for (y, s) in ["┌ t ─┐┌────┐", "│ab  ││cd  │", "│    ││    │", "│e   ││    │", "│    ││    │", "└────┘└────┘", "status      "]
+            .iter()
+            .enumerate()
+        {
+            for (x, ch) in s.chars().enumerate() {
+                let cell = &mut buf[(x as u16, y as u16)];
+                cell.set_symbol(&ch.to_string());
+                if "┌┐└┘─│".contains(ch) {
+                    cell.fg = Color::Indexed(8);
+                }
+            }
+        }
+        // An explicit background (the selected row) is left alone.
+        buf[(1, 3)].bg = Color::Cyan;
+        back_text(&mut buf, area);
+        assert_eq!(
+            backing_map(&buf),
+            [
+                ".###........", // the title, not the frame around it
+                ".####..####.",
+                ".####.......",
+                "..###.......", // (1,3) keeps its own background
+                "............",
+                "............",
+                "############", // the frameless status row
+            ]
+        );
+        assert_eq!(buf[(1, 3)].bg, Color::Cyan);
+    }
 
     #[test]
     fn runs_group_neighbours() {
