@@ -26,7 +26,7 @@ const ACCENT: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 /// The selected row.
 // Listed in contrib/kitty/seekr.conf (transparent_background_colors) so the
 // launcher window makes it as see-through as the rest; keep the two the same.
-const HIGHLIGHT: Style = Style::new().bg(Color::Rgb(70, 74, 86)).add_modifier(Modifier::BOLD);
+const HIGHLIGHT: Style = Style::new().bg(Color::Rgb(40, 44, 52)).add_modifier(Modifier::BOLD);
 /// The whole query, selected after a hotkey hide.
 const SELECTED_TEXT: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 

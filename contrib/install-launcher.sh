@@ -4,15 +4,15 @@
 # shell, so no ~/.zshrc delay); seekr then stays alive between uses and the
 # hotkey only reveals its window.
 #
-#   contrib/install-launcher.sh [--hotkey cmd+space] [--opacity 0.8] [--uninstall]
+#   contrib/install-launcher.sh [--hotkey cmd+space] [--opacity 0.6] [--uninstall]
 #
 # --hotkey takes modifiers and key joined with "+" (hs.hotkey names: cmd, ctrl,
 # alt, shift; keys as in hs.keycodes.map). Cmd+Space is Spotlight's shortcut
 # and, on macOS 15, Siri's (hold), so with that hotkey the script turns both
 # shortcuts off (nothing else about Spotlight or Siri changes) and gives them
 # back when a later run picks another key. --opacity is the window's, 0 to 1:
-# 0.8 is translucent grey with the desktop blurred behind it, 1 is solid
-# grey. Re-running keeps the hotkey and opacity last installed unless the
+# 0.6 is translucent black with the desktop blurred behind it, 1 is solid
+# black. Re-running keeps the hotkey and opacity last installed unless the
 # options say otherwise. --uninstall removes the launcher and gives the
 # shortcuts back; kitty, Hammerspoon and seekr stay installed.
 # Safe to re-run. Requires Homebrew for the kitty/Hammerspoon install steps.
@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
       HOTKEY=$2; shift 2 ;;
     --hotkey=*) HOTKEY=${1#--hotkey=}; shift ;;
     --opacity)
-      [ $# -ge 2 ] || { echo "--opacity needs a value between 0 and 1, e.g. --opacity 0.8" >&2; exit 2; }
+      [ $# -ge 2 ] || { echo "--opacity needs a value between 0 and 1, e.g. --opacity 0.6" >&2; exit 2; }
       OPACITY=$2; shift 2 ;;
     --opacity=*) OPACITY=${1#--opacity=}; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
@@ -175,7 +175,7 @@ if [ -z "$OPACITY" ] && [ -f "$OPACITY_FILE" ]; then
 fi
 case "$OPACITY" in
   ''|0|1|0.[0-9]*|1.0|1.00|.[0-9]*) ;;
-  *) echo "opacity: a number between 0 and 1, e.g. --opacity 0.8 (got '$OPACITY')" >&2; exit 2 ;;
+  *) echo "opacity: a number between 0 and 1, e.g. --opacity 0.6 (got '$OPACITY')" >&2; exit 2 ;;
 esac
 
 SEEKR_BIN=${SEEKR_BIN:-$(command -v seekr 2>/dev/null || true)}
