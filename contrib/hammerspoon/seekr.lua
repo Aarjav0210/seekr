@@ -37,6 +37,12 @@
 -- Terminal.app was used before kitty; it cannot drop its title bar and hiding
 -- one of its windows needed AppleScript (see git history).
 --
+-- The panel is seekr's alone: kitty's own shortcuts are turned off in its
+-- config, since a ⌘T there opens a shell in a tab next to seekr, and a kitty
+-- with a second tenant stays up after seekr quits, showing a terminal on
+-- every press. Should a panel outlive its seekr anyway, the hotkey ends it and
+-- starts a fresh one (see endIfAbandoned).
+--
 -- Install: contrib/install-launcher.sh (copies this file to ~/.hammerspoon and
 -- adds `require("seekr")` to init.lua).
 
@@ -67,6 +73,9 @@ M.debug = false -- when true, decisions and timings are appended to /tmp/seekr-h
 
 -- kitty runs one panel process per instance group; the toggle addresses it by name.
 local INSTANCE_GROUP = "seekr"
+-- Seconds a new panel gets to start seekr before a missing resident.json
+-- means anything (kitty alone takes about one to open its window).
+local STARTUP_GRACE = 10
 
 local function firstExisting(paths)
   for _, p in ipairs(paths) do
@@ -97,6 +106,8 @@ local BUNDLES = { "net.kovidgoyal.kitty-quick-access", "net.kovidgoyal.kitty" }
 M._task = nil       -- hs.task of the kitty process we started
 M._panelArgs = nil  -- kitten's arguments for that process; toggles repeat them
 M._launching = nil  -- hs.timer while a window is being created or shown; guards against double launches
+M._launchedAt = nil -- when the panel was started, for STARTUP_GRACE
+M._ending = nil     -- hs.task while a panel without seekr is being checked and ended (see endIfAbandoned)
 M._startedAt = nil  -- when the current show began; M.lastLatency holds hotkey → window placed, in seconds
 M._prevWindow = nil -- window that had focus before seekr was shown; focus returns there on hide
 M._screen = nil     -- screen the user was on when the hotkey was pressed; the window goes there
@@ -160,6 +171,14 @@ end
 -- running processes, and the lookup fails for a panel that is alive.
 local function panelRunning()
   return M._task ~= nil and M._task:isRunning()
+end
+
+-- The panel process's pid, or nil when there is none: the one we started, or
+-- after a Hammerspoon reload the one launcher.json names, if that is a kitty.
+local function panelPid()
+  if panelRunning() then return M._task:pid() end
+  local a = app()
+  return a and a:pid()
 end
 
 -- Is `w` the launcher's window? Decided by process, not title: a Finder or
@@ -331,7 +350,11 @@ local function launch()
   for _, v in ipairs(M._panelArgs) do args[#args + 1] = v end
   args[#args + 1] = M.seekr
   args[#args + 1] = "--resident"
-  M._task = hs.task.new(M.kitten, function()
+  local task
+  task = hs.task.new(M.kitten, function()
+    -- A panel that was ended and replaced (see endIfAbandoned) may report in
+    -- after its successor started; the state is the successor's by then.
+    if M._task ~= task then return end
     M._task = nil
     os.remove(M.launcherFile)
     -- A panel of this instance group was already running: kitty handed our
@@ -341,7 +364,9 @@ local function launch()
       hs.alert.show("seekr: another launcher panel is already running; quit it (Ctrl+C in it) or log out")
     end
   end, args)
+  M._task = task
   M._task:start()
+  M._launchedAt = hs.timer.secondsSinceEpoch()
   writeLauncherState(M._task:pid(), M._panelArgs)
   log("launch: kitten pid %s", tostring(M._task:pid()))
   awaitWindow(function()
@@ -373,6 +398,58 @@ local function reveal()
   return true
 end
 
+-- The pid of a panel that may have lost its seekr, or nil: it is up and past
+-- starting, yet no resident advertises itself. seekr deletes resident.json
+-- when it quits, and kitty closes the window with it, unless kitty has
+-- something else open there (a shell in a tab of its own, say): then the
+-- panel lives on showing only that, and a toggle would bring up a terminal.
+local function suspectPanel()
+  if residentState() then return nil end
+  if M._launchedAt and hs.timer.secondsSinceEpoch() - M._launchedAt < STARTUP_GRACE then return nil end
+  return panelPid()
+end
+
+-- For such a panel: make sure, and if seekr is indeed gone, end the panel and
+-- wait until it is. $1 is its pid, $2 the instance group. Sure means the
+-- process list agrees: the pid is the launcher's panel and none of its
+-- children is `seekr --resident` (a seekr whose resident.json went missing
+-- stays). Exits 0 once the panel is gone, 3 when it is not ours to end, 4 if
+-- it would not go.
+local END_ABANDONED_PANEL = [[
+case "$(/bin/ps -ww -o command= -p "$1" 2>/dev/null) " in
+  *" --instance-group=$2 "* | *" --instance-group $2 "*) ;;
+  *) exit 3 ;;
+esac
+/usr/bin/pgrep -P "$1" -f -- ' --resident$' >/dev/null
+[ $? -eq 1 ] || exit 3
+kill -TERM "$1" 2>/dev/null
+n=0
+while kill -0 "$1" 2>/dev/null; do
+  n=$((n + 1))
+  if [ "$n" -eq 20 ]; then kill -KILL "$1" 2>/dev/null; fi
+  if [ "$n" -ge 50 ]; then exit 4; fi
+  /bin/sleep 0.1
+done
+exit 0
+]]
+
+-- Run that check on panel `pid` and call `done(ended)`: true when the panel
+-- had no seekr and is gone now (two panels of one instance group would be
+-- one kitty process, so the next may only start then), false when it stays.
+local function endIfAbandoned(pid, done)
+  log("show: panel %d advertises no seekr, checking", pid)
+  local task = hs.task.new("/bin/sh", function(code)
+    M._ending = nil
+    log("show: panel %d %s (check exited %s)", pid, code == 0 and "had no seekr, ended" or "stays", tostring(code))
+    done(code == 0)
+  end, { "-c", END_ABANDONED_PANEL, "sh", tostring(pid), INSTANCE_GROUP })
+  if task and task:start() then
+    M._ending = task
+  else
+    done(false)
+  end
+end
+
 -- Called by seekr (via the `hs` CLI) after Enter/Esc: hide the window, keep the
 -- process. kitty hands activation to the app that was in front last, which
 -- after Esc is the one the user came from and after Enter the one `open` just
@@ -402,20 +479,33 @@ end
 
 -- The hotkey: reveal seekr, or hide it again when it already has focus.
 function M.show()
-  if M._launching then return end -- a window is already on its way
+  if M._launching or M._ending then return end -- a window is already on its way
   local focused = hs.window.focusedWindow()
-  if isLauncherWindow(focused) then
+  local onLauncher = isLauncherWindow(focused)
+  local function hideAgain()
     log("show: seekr focused, hiding")
     M.hide()
     parkResident()
-    return
   end
+  local suspect = suspectPanel()
+  if onLauncher and not suspect then return hideAgain() end
   M._startedAt = hs.timer.secondsSinceEpoch()
-  if focused then M._prevWindow = focused end
+  if focused and not onLauncher then M._prevWindow = focused end
   -- Where the user is: the focused window's screen, else the mouse's.
   M._screen = (focused and focused:screen()) or hs.mouse.getCurrentScreen()
-  if reveal() then return end
-  launch()
+  if not suspect then
+    if not reveal() then launch() end
+    return
+  end
+  endIfAbandoned(suspect, function(ended)
+    if ended then
+      launch() -- whatever that panel was showing, in front or not, the key asked for seekr
+    elseif onLauncher then
+      hideAgain()
+    elseif not reveal() then
+      launch()
+    end
+  end)
 end
 
 -- hs.hotkey registers the key with the system exclusively, which fails

@@ -56,6 +56,7 @@ example `--hotkey ctrl+space`.
 | `⌦` | Delete the character after the caret. |
 | `⌥⌫`, `^w` | Delete the word before the caret. A scope like `doc:` counts as a word. |
 | `⌘⌫`, `^u` | Delete everything before the caret. |
+| `⌘V` | Paste at the caret. |
 
 `^e` and `End` are taken by the results, so end-of-line is `⌘→`.
 
@@ -64,6 +65,10 @@ maps them (`contrib/kitty/seekr.conf`); in other terminals use `^a`, `⌥→` an
 `^u`. `⌥` chords need the terminal to send Option as Alt (the launcher's kitty
 does; in Terminal.app turn on "Use Option as Meta key"). macOS keeps `^←` and
 `^→` for switching desktops unless you turn those shortcuts off.
+
+The launcher's window has none of kitty's own shortcuts (`⌘T` new tab, `⌘N`
+new window, `⌘W` close, …), and seekr does not take a `⌘` chord for typing:
+`⌘` with a letter or a digit does nothing there.
 
 ## A selected query
 
