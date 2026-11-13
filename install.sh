@@ -33,6 +33,8 @@ Install or upgrade seekr: $INSTALL_CMD [options]
   --yes           set up the launcher without asking
   --hotkey KEY    the launcher's key instead of Cmd+Space, e.g. ctrl+space
                   (implies --yes; later runs keep it)
+  --opacity N     the launcher window's opacity, 0 to 1: 0.6 is translucent
+                  black, 1 is solid (implies --yes; later runs keep it)
   --version TAG   install the release TAG, e.g. v1.2.1, instead of the latest
   --uninstall     remove seekr, the launcher, the index and the settings, and
                   give Cmd+Space back to Spotlight
@@ -119,6 +121,7 @@ uninstall() {
 main() {
   LAUNCHER=ask
   HOTKEY=""
+  OPACITY=""
   VERSION=""
   UNINSTALL=""
   NEW_TERMINAL=""
@@ -130,6 +133,10 @@ main() {
         [ $# -ge 2 ] || die "--hotkey needs a value, e.g. --hotkey ctrl+space"
         HOTKEY=$2; LAUNCHER=yes; shift 2 ;;
       --hotkey=*) HOTKEY=${1#--hotkey=}; LAUNCHER=yes; shift ;;
+      --opacity)
+        [ $# -ge 2 ] || die "--opacity needs a value between 0 and 1, e.g. --opacity 0.6"
+        OPACITY=$2; LAUNCHER=yes; shift 2 ;;
+      --opacity=*) OPACITY=${1#--opacity=}; LAUNCHER=yes; shift ;;
       --version)
         [ $# -ge 2 ] || die "--version needs a release tag, e.g. --version v1.2.1"
         VERSION=$2; shift 2 ;;
@@ -186,7 +193,7 @@ main() {
     say "note: $other comes before it on PATH"
   fi
 
-  # An existing launcher is updated without asking, keeping its hotkey.
+  # An existing launcher is updated without asking, keeping its hotkey and opacity.
   if [ "$LAUNCHER" = ask ] && [ -f "$HOME/.hammerspoon/seekr.lua" ]; then
     LAUNCHER=yes
   fi
@@ -224,7 +231,8 @@ MSG
       export PATH
     fi
     set --
-    if [ -n "$HOTKEY" ]; then set -- --hotkey "$HOTKEY"; fi
+    if [ -n "$HOTKEY" ]; then set -- "$@" --hotkey "$HOTKEY"; fi
+    if [ -n "$OPACITY" ]; then set -- "$@" --opacity "$OPACITY"; fi
     if has_tty; then IN=/dev/tty; else IN=/dev/null; fi
     SEEKR_BIN="$BIN_DIR/seekr" SEEKR_LAUNCHER_CMD="$INSTALL_CMD" \
       sh "$SRC/contrib/install-launcher.sh" "$@" <"$IN"
