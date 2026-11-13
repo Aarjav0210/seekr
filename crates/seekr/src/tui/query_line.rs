@@ -13,6 +13,15 @@ pub enum Edit {
     Changed,
 }
 
+/// Modifiers that make a character key a chord instead of text. ⌘ is one of
+/// them: a terminal speaking the kitty keyboard protocol (kitty, the
+/// launcher's host) reports ⌘T as a `t` with SUPER, and it must not type a "t".
+const CHORD: KeyModifiers = KeyModifiers::CONTROL
+    .union(KeyModifiers::ALT)
+    .union(KeyModifiers::SUPER)
+    .union(KeyModifiers::HYPER)
+    .union(KeyModifiers::META);
+
 #[derive(Debug, Default)]
 pub struct QueryLine {
     text: String,
@@ -69,9 +78,8 @@ impl QueryLine {
         if !std::mem::take(&mut self.selected) {
             return None;
         }
-        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match code {
-            KeyCode::Char(ch) if plain => {
+            KeyCode::Char(ch) if !mods.intersects(CHORD) => {
                 self.set(ch.to_string());
                 Some(Edit::Changed)
             }
@@ -107,7 +115,7 @@ impl QueryLine {
             KeyCode::Backspace if cmd => self.splice(start, at, ""),
             KeyCode::Backspace if at > start => self.splice(at - 1, at, ""),
             KeyCode::Delete if at < end => self.splice(at, at + 1, ""),
-            KeyCode::Char(ch) if !ctrl && !alt => self.splice(at, at, ch.encode_utf8(&mut [0; 4])),
+            KeyCode::Char(ch) if !mods.intersects(CHORD) => self.splice(at, at, ch.encode_utf8(&mut [0; 4])),
             _ => Edit::Ignored,
         }
     }
@@ -248,6 +256,26 @@ mod tests {
         l.set("a b c".into());
         l.key(KeyCode::Backspace, CMD);
         assert_eq!(shown(&l), "|");
+    }
+
+    #[test]
+    fn a_command_chord_types_nothing() {
+        // ⌘T as a kitty-protocol terminal reports it: `t` with SUPER.
+        let mut l = line("offer");
+        assert_eq!(l.key(KeyCode::Char('t'), CMD), Edit::Ignored);
+        assert_eq!(l.key(KeyCode::Char('A'), CMD | KeyModifiers::SHIFT), Edit::Ignored);
+        assert_eq!(l.key(KeyCode::Char('1'), CMD), Edit::Ignored);
+        assert_eq!(shown(&l), "offer|");
+        // ⇧ alone is still just a capital.
+        assert_eq!(l.key(KeyCode::Char('S'), KeyModifiers::SHIFT), Edit::Changed);
+        assert_eq!(shown(&l), "offerS|");
+
+        // Nor does it replace a selected query.
+        l.set("offer".into());
+        l.select_all();
+        assert_eq!(l.key_on_selection(KeyCode::Char('a'), CMD), None);
+        assert_eq!(l.key(KeyCode::Char('a'), CMD), Edit::Ignored);
+        assert_eq!(l.text(), "offer");
     }
 
     #[test]

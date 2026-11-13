@@ -262,7 +262,10 @@ never slows it down. Hammerspoon shows and hides it with kitty's
 `--toggle-visibility` and tells seekr through signals: SIGUSR1 when it shows
 the window (seekr refreshes), SIGUSR2 when the hotkey hid it (seekr keeps the
 query). seekr asks Hammerspoon to hide the window after `⏎` or `esc`. The
-Lua and the kitty config live in `contrib/`.
+window is seekr's alone: kitty's own shortcuts (`⌘T`, `⌘N`, `⌘W`, …) are off
+in it, so no key opens a shell there, and should the window ever outlive
+seekr, the next ⌘Space replaces it with a fresh one. The Lua and the kitty
+config live in `contrib/`.
 
 ## Command line
 
